@@ -348,31 +348,46 @@ Polars-side "attach another catalog" concept, needs its own research pass);
 `TableInfo.supports_time_travel` per-table discovery (see "Time travel" above — a
 genuine wire-schema addition, needs a protocol bump + C++ codegen regen).
 
-**Not possible without a Python transport layer (a substantially larger, separate
-effort than anything above — confirmed, not deferred by scope choice):**
-`container://`/`github://`/`launch:` LOCATIONs. `vgi.client.Client`'s `transport`
-parameter is a closed `Literal["subprocess", "http", "tcp"]` — these three schemes
-are implemented **only** in this repo's C++ extension (`vgi_container_runtime.cpp`
-launching an OCI runtime, `vgi_github.cpp` downloading+extracting a release
-archive, and `vgi_rpc.launcher`'s flock+hash+spawn coordination for `launch:`),
-with zero vgi-python-side equivalent to adapt (`Client("launch:...")` fails with a
-raw `FileNotFoundError` — the string is handed straight to `subprocess.Popen` as a
-literal command). Supporting any of these in vgi-polars means building that
-transport layer from scratch in Python — a separate design effort, not a
-same-shape extension of the existing `_detect_transport` scheme table.
+**Not implemented: blended (row-transform) table functions / correlated LATERAL
+joins.** A worker function called directly with caller-supplied literal or
+column arguments and no separate table input. Confirmed absent by direct
+investigation: no `blended`/`row_transform`/`input_from_args` reference
+anywhere in this repo. The public `open_meteo` VGI worker
+(github.com/Query-farm/vgi-open-meteo — see its `src/functions.ts`, "All of
+them are **blended row-transform** functions") has *zero* plain catalog
+tables reachable via `cat.table(schema, name)`; every one of its functions
+(`geocoding`, `forecast_hourly`, etc.) needs this shape, so none of it is
+reachable from vgi-polars today — only its sibling `vgi-earthquakes` worker
+(a genuine table, `main.recent`; see the README's live example) is.
+`table_in_out_function` doesn't cover this either — it requires an existing
+`LazyFrame`/`DataFrame` as input, which a blended call in its literal-args
+form doesn't have. Needs its own bridge design, not an extension of an
+existing one.
+
+**`launch:` LOCATIONs — implemented in vgi-python, not yet wired in here.**
+`vgi.client.Client.from_launch(...)` / `transport="launch"` (vgi-python
+v0.29.4+) spawns-or-reuses a warm worker over an AF_UNIX socket via
+`vgi_rpc.launcher`, mirroring the existing `tcp` transport's shape — this
+closed the gap this section used to describe (`Client`'s transport used to
+be a closed `Literal["subprocess", "http", "tcp"]` with zero unix-socket
+equivalent to `vgi_rpc.launcher`). `attach()`'s `_detect_transport` here
+still only recognizes `http(s)://`/`tcp://`/bare-command — extending it for
+`launch:`/`unix://` is now a small, well-scoped addition (mirror the
+existing three-branch shape in `catalog.py`), not blocked on any upstream
+gap.
+
+**`container://`/`github://` LOCATIONs — not possible without a Python
+transport layer (a substantially larger, separate effort — confirmed, not
+deferred by scope choice).** Implemented **only** in this repo's C++
+extension (`vgi_container_runtime.cpp` launching an OCI runtime,
+`vgi_github.cpp` downloading+extracting a release archive), with zero
+vgi-python-side equivalent to adapt. Supporting either in vgi-polars means
+building that transport layer from scratch in Python.
 
 **Not possible without upstream changes:** a `pl.sql(...)` string surface for VGI table
 functions — `pl.SQLContext.register` only accepts an already-built frame, no
 user-registrable table-valued function exists in Polars SQL. The Python API
-(`cat.table(...).scan()`) is the only entry point. Also: `vgi.client.Client`
-has no unix-socket transport (only subprocess/http/tcp), so the real
-`vgi_rpc.launcher` module (unix-socket-only) can't be paired with it —
-`tests/conftest.py`'s `_launch_tcp_worker` is a hand-rolled TCP analogue
-instead (see "Build / Test" and "TCP transport" above). Adding unix-socket
-support to `Client` (mirroring its existing `transport="tcp"` code almost
-exactly, since `vgi_rpc.rpc.unix_connect` already exists) is a small,
-well-scoped vgi-python change if the real launcher module's cross-process
-semantics are ever needed beyond what the TCP analogue provides.
+(`cat.table(...).scan()`) is the only entry point.
 
 ## Build / Test
 

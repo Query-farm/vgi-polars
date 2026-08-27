@@ -72,15 +72,79 @@ vgi-polars unchanged; VGI is a cross-language protocol, not a Python-specific on
 See [vgi-python](https://github.com/Query-farm/vgi-python) for reference worker
 implementations and the protocol documentation.
 
-## Design principle: pushdown is an optimization, never a correctness delegation
+## Live example: earthquakes
 
-Polars does **not** re-verify a predicate/projection an `io_source` claims to have
-applied — confirmed empirically (see CLAUDE.md). VGI worker implementations, meanwhile,
-are written and tested against the DuckDB extension, which *does* always re-verify, so
-a worker may declare `filter_pushdown`/`projection_pushdown` and still apply either only
-approximately. Since neither side can be trusted alone, vgi-polars always applies the
-complete, original filter/projection/limit locally after scanning, regardless of what
-was pushed down. Pushdown here only ever affects performance, never correctness.
+No local worker needed — this attaches over HTTPS to a live, public VGI worker
+serving the [USGS Earthquake Hazards Program](https://earthquake.usgs.gov/)'s
+rolling 30-day feed as an ordinary table. More live example workers (weather,
+volcanoes, and others) at [query.farm/vgi](https://query.farm/vgi/).
+
+```python
+import polars as pl
+import vgi_polars as vp
+
+cat = vp.attach("https://vgi-earthquakes.rusty-bb6.workers.dev", name="earthquakes")
+recent = cat.table("main", "recent")
+
+print(
+    recent.scan()
+    .filter(pl.col("mag") >= 5)
+    .sort("mag", descending=True)
+    .head(8)
+    .select("time", pl.col("mag").round(1), "place")
+    .collect()
+)
+```
+
+```text
+shape: (8, 3)
+┌─────────────────────────────┬─────┬─────────────────────────────────┐
+│ time                        ┆ mag ┆ place                           │
+│ ---                         ┆ --- ┆ ---                             │
+│ datetime[μs, UTC]           ┆ f64 ┆ str                             │
+╞═════════════════════════════╪═════╪═════════════════════════════════╡
+│ 2026-08-14 21:58:21.564 UTC ┆ 7.7 ┆ 68 km NNW of Ende, Indonesia    │
+│ 2026-08-10 12:34:28.125 UTC ┆ 7.4 ┆ 5 km S of San José del Palmar,… │
+│ …                            ┆ …   ┆ …                               │
+└─────────────────────────────┴─────┴─────────────────────────────────┘
+```
+
+The `.filter()`/`.sort()`/`.head()`/`.select()` chain runs entirely against the
+`LazyFrame` `.scan()` returns — nothing is fetched until `.collect()`. If the worker
+declares filter/projection pushdown support, `mag >= 5` and the column selection are
+sent to it to reduce what crosses the wire; either way, the *complete* original
+predicate and projection are always re-applied locally after scanning too (see
+[Pushdown is an optimization, never a correctness delegation](#pushdown-is-an-optimization-never-a-correctness-delegation)
+below), so the result is identical whether or not pushdown happened to work.
+
+## Pushdown is an optimization, never a correctness delegation
+
+This is the single design principle vgi-polars won't compromise on, so it's worth
+stating plainly: **a worker's pushdown support is never trusted for correctness, only
+for performance.**
+
+Polars' `register_io_source` extension point — the mechanism `.scan()` is built on —
+does **not** re-verify a predicate or projection an `io_source` claims to have
+applied. An `io_source` that silently ignores the `predicate` it's handed still gets
+every row back, unfiltered, in the final `.collect()` result; Polars has no fallback
+check. This was confirmed empirically, not assumed: a `register_io_source` callback
+that received a filter and did nothing with it produced unfiltered results with no
+warning or error anywhere in the pipeline.
+
+VGI workers, meanwhile, are written and tested against the DuckDB extension, which
+*always* re-verifies a pushed-down predicate against DuckDB's own query engine — so a
+worker can declare `filter_pushdown`/`projection_pushdown` support and still apply
+either only approximately (e.g. a worker that pushes an equality filter but silently
+ignores a range filter it doesn't know how to translate) and never notice, because
+DuckDB was always going to catch the difference downstream. Polars won't.
+
+Two systems that each individually assume "the other side will catch what I miss"
+add up to neither side catching anything. So vgi-polars breaks that: every scan
+**always** applies the complete, original `with_columns` selection, `predicate`, and
+row-limit truncation locally, after fetching, regardless of what was pushed down or
+what the worker claims to have handled. A partial or entirely-failed pushdown
+translation is therefore only ever a performance loss — sending more rows/columns
+than strictly necessary — never a correctness one.
 
 ## Status
 
@@ -104,28 +168,49 @@ was pushed down. Pushdown here only ever affects performance, never correctness.
 - Writes
 - Companion-catalog federation
 - Per-table time-travel discovery
-- The `container://`/`github://`/`launch:` transport schemes (a substantially
-  larger effort — a from-scratch Python transport layer, not an extension of the
-  existing scheme table)
-
-See [CLAUDE.md](CLAUDE.md) for the full architecture, every non-obvious behavior
-discovered while building this, and an evidence-backed breakdown of every scoped-out
-item above.
+- Blended (row-transform) table functions — a worker function called with caller-supplied
+  literal or column arguments and no separate table input (DuckDB's `SELECT * FROM
+  t, LATERAL geocode(t.place)`-style correlated join, or a bare `geocode('some place')`
+  literal call). vgi-polars can only scan pre-registered catalog *tables*
+  (`cat.table(schema, name)`) and drive *table-in-out* functions that transform an
+  existing `LazyFrame`/`DataFrame` — there's no bridge yet for a table-producing
+  function invoked directly with its own arguments.
+- The `container://`/`github://` transport schemes (a substantially larger effort — a
+  from-scratch Python transport layer, not an extension of the existing scheme table).
+  `launch:`/`unix://` (a launcher-managed shared worker) is implemented in the
+  underlying `vgi-python` client (`Client.from_launch`, v0.29.4+) but not yet wired
+  into `attach()`'s scheme detection here.
 
 ## Development
 
 ```bash
 git clone https://github.com/Query-farm/vgi-polars.git
-git clone https://github.com/Query-farm/vgi-python.git   # sibling checkout, see CLAUDE.md
+git clone https://github.com/Query-farm/vgi-python.git   # sibling checkout — see below
 cd vgi-polars
 uv sync
 uv run pytest -v
 ```
 
-vgi-polars tracks vgi-python's client-side surface as both develop together — see
-[CLAUDE.md](CLAUDE.md)'s "Build / Test" section for why a sibling `vgi-python`
-checkout is used locally and in CI rather than the published package, and for the
-full test-running/fixture-worker setup.
+`vgi-python` is pulled from that local sibling checkout (`[tool.uv.sources]` in
+`pyproject.toml`, path `../vgi-python`) rather than the published PyPI release,
+because this repo tracks vgi-python's client-side surface as both projects develop
+together — the same pattern `vgi-spark`'s `settings.gradle.kts` uses to
+composite-build a sibling `vgi-java` checkout. Integration tests need a
+`vgi-fixture-worker` binary from that checkout; `VGI_PYTHON` (default
+`~/Development/vgi-python`) picks which one, and `VGI_TEST_WORKER` overrides the
+binary path directly if you need something other than the default venv location.
+
+`uv run mypy src/`, `uv run ruff check src/ tests/`, and `uv run ruff format --check
+src/ tests/` mirror what CI runs; `tests/test_docstrings.py` runs `pydoclint` as part
+of the normal `pytest` run rather than as a separate step.
+
+## Learn more
+
+[CLAUDE.md](CLAUDE.md) is this repo's deep-dive doc — full architecture, every
+non-obvious behavior discovered while building this (with the live evidence behind
+each one), and a more detailed, evidence-backed version of the Status section above.
+Not required reading to use the package; it's there for contributors and for anyone
+who wants the "why," not just the "what."
 
 ## License
 
