@@ -159,13 +159,15 @@ def _launch_tcp_worker(argv: list[str], *, idle_timeout: float = 1800.0) -> int:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def _spawn_http_worker(extra_env: dict[str, str] | None = None):
+def _spawn_http_worker(extra_env: dict[str, str] | None = None, *, bearer_token: str | None = None):
     """Spawn `vgi-fixture-http` on a free port and yield its base URL.
 
     Waits for it to actually serve requests (see the readiness-probe note
     below), then yields its base URL — shared by the anonymous and
     bearer-auth HTTP fixtures below. Skips (doesn't fail) the calling
-    fixture's tests if the binary is missing or never comes up.
+    fixture's tests if the binary is missing or never comes up. `bearer_token`
+    is the token the readiness probe itself should authenticate with —
+    required when `extra_env` turns on `VGI_BEARER_TOKENS` (see the caller).
     """
     http_bin = _vgi_python_venv() / "vgi-fixture-http"
     if not http_bin.exists():
@@ -193,32 +195,34 @@ def _spawn_http_worker(extra_env: dict[str, str] | None = None):
         t.start()
 
     base_url = f"http://127.0.0.1:{port}"
-    # A raw `socket.create_connection` only proves the listening socket is
-    # open, not that the WSGI app behind it is ready to answer a real
-    # request — confirmed live as the cause of a CI-only (never local)
-    # failure: the very first `catalog_attach` against a freshly spawned
-    # server (specifically the bearer-auth one, which each test session
-    # spawns fresh right before its first real request) got back a
-    # truncated/errored response body, surfacing as `pyarrow.lib.ArrowInvalid:
-    # Invalid IPC stream: negative continuation token` — a corrupted-looking
-    # Arrow stream that was actually just an HTTP response caught mid-startup.
-    # `http_capabilities()` (an `OPTIONS /health` probe, exempt from auth —
-    # see vgi-python's `wait_for_http_server` in `tests/_http_fixtures.py`,
-    # which this mirrors) does a real round-trip through the same app the
-    # RPC calls will hit, so "ready" here actually means ready.
-    from vgi_rpc.http import http_capabilities
-
+    # A raw `socket.create_connection`, and even a lighter-weight protocol
+    # probe like `http_capabilities()`'s `OPTIONS /health` (exempt from auth,
+    # handled by middleware ahead of full request dispatch), both proved
+    # insufficient in practice: confirmed live on CI (never locally) that the
+    # very first real `catalog_attach` against a freshly spawned server could
+    # still get back a truncated/errored response body — surfacing as
+    # `pyarrow.lib.ArrowInvalid: Invalid IPC stream: negative continuation
+    # token` — even after a `/health` probe had already succeeded. Whatever
+    # startup race this is (waitress's worker-thread pool warming up
+    # separately from the listening socket, most likely) apparently isn't
+    # exercised by a cheap health check. So the readiness probe here is the
+    # real thing: an actual `attach()`/`detach()` against the "example"
+    # catalog, retried — the exact RPC path (Arrow IPC parsing of a
+    # `CatalogAttachResult`) every real test below also drives, so "ready"
+    # here really does mean ready for what comes next.
     deadline = time.monotonic() + 15
     ready = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             break
         try:
-            http_capabilities(base_url=base_url)
-            ready = True
-            break
+            probe_catalog = vp.attach(base_url, name="example", bearer_token=bearer_token)
         except Exception:  # noqa: BLE001 - readiness probe; any failure just means "not yet"
             time.sleep(0.2)
+            continue
+        probe_catalog.detach()
+        ready = True
+        break
 
     if not ready:
         proc.terminate()
@@ -273,7 +277,9 @@ def http_bearer_worker_base_url(http_bearer_token: str):
     `vgi-sqlite/test/integration/conftest.py`'s
     `http_bearer_token`/`VGI_BEARER_TOKENS` fixture pattern.
     """
-    yield from _spawn_http_worker({"VGI_BEARER_TOKENS": f"{http_bearer_token}=test-principal"})
+    yield from _spawn_http_worker(
+        {"VGI_BEARER_TOKENS": f"{http_bearer_token}=test-principal"}, bearer_token=http_bearer_token
+    )
 
 
 @pytest.fixture
