@@ -195,21 +195,19 @@ def _spawn_http_worker(extra_env: dict[str, str] | None = None, *, bearer_token:
         t.start()
 
     base_url = f"http://127.0.0.1:{port}"
-    # A raw `socket.create_connection`, and even a lighter-weight protocol
-    # probe like `http_capabilities()`'s `OPTIONS /health` (exempt from auth,
-    # handled by middleware ahead of full request dispatch), both proved
-    # insufficient in practice: confirmed live on CI (never locally) that the
-    # very first real `catalog_attach` against a freshly spawned server could
-    # still get back a truncated/errored response body — surfacing as
-    # `pyarrow.lib.ArrowInvalid: Invalid IPC stream: negative continuation
-    # token` — even after a `/health` probe had already succeeded. Whatever
-    # startup race this is (waitress's worker-thread pool warming up
-    # separately from the listening socket, most likely) apparently isn't
-    # exercised by a cheap health check. So the readiness probe here is the
-    # real thing: an actual `attach()`/`detach()` against the "example"
-    # catalog, retried — the exact RPC path (Arrow IPC parsing of a
-    # `CatalogAttachResult`) every real test below also drives, so "ready"
-    # here really does mean ready for what comes next.
+    # A raw `socket.create_connection` only proves the listening socket is
+    # open, not that a real RPC round-trip through it actually works — so the
+    # probe here is the real thing: an actual `attach()`/`detach()` against
+    # the "example" catalog, retried, the exact RPC path every real test
+    # below also drives. NOT a workaround for server startup timing (there
+    # isn't any here — confirmed by reproducing this deterministically, with
+    # or without any delay, on a from-scratch Linux box): a stale
+    # `vgi-python`/`vgi-rpc` install can make EVERY `catalog_attach` over
+    # HTTP fail identically (e.g. a client that silently receives a still
+    # zstd-compressed response body — see vgi-python commit c02f133 for a
+    # real instance of this). A real round-trip catches that class of bug at
+    # the same place a raw connect never would.
+    last_error: Exception | None = None
     deadline = time.monotonic() + 15
     ready = False
     while time.monotonic() < deadline:
@@ -217,7 +215,8 @@ def _spawn_http_worker(extra_env: dict[str, str] | None = None, *, bearer_token:
             break
         try:
             probe_catalog = vp.attach(base_url, name="example", bearer_token=bearer_token)
-        except Exception:  # noqa: BLE001 - readiness probe; any failure just means "not yet"
+        except Exception as e:  # noqa: BLE001 - readiness probe; retried below
+            last_error = e
             time.sleep(0.2)
             continue
         probe_catalog.detach()
@@ -225,12 +224,26 @@ def _spawn_http_worker(extra_env: dict[str, str] | None = None, *, bearer_token:
         break
 
     if not ready:
+        died = proc.poll() is not None
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        pytest.skip(f"vgi-fixture-http didn't start on {base_url} (rc={proc.returncode}). Output:\n{''.join(tail)}")
+        if died:
+            # The process itself never came up — a real environment gap
+            # (missing system lib, port conflict, etc.), not a code bug.
+            pytest.skip(
+                f"vgi-fixture-http exited before serving on {base_url} (rc={proc.returncode}).\n{''.join(tail)}"
+            )
+        # The server accepted connections and stayed alive the whole time,
+        # yet no real RPC through it ever succeeded — that is a bug (in this
+        # code, vgi-python, or vgi-rpc), not an environment gap, so it must
+        # fail loudly rather than silently skip. A skip here is exactly how
+        # a real, deterministic client-side bug (see above) went unnoticed
+        # for a while: every affected run just read as "0 HTTP tests ran"
+        # instead of failing.
+        pytest.fail(f"vgi-fixture-http on {base_url} never answered a real request: {last_error!r}\n{''.join(tail)}")
 
     yield base_url
 
