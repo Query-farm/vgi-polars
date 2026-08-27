@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      vgi_python_ref:
+        description: >-
+          git ref (tag/branch/sha) of Query-farm/vgi-python to test against.
+          Defaults to the pinned tag below when left blank.
+        required: false
+        default: ""
+
+# vgi-polars depends on vgi-python via a LOCAL SIBLING checkout
+# ([tool.uv.sources] in pyproject.toml, path = "../vgi-python"), not the
+# published PyPI release — this repo tracks vgi-python's client-side surface
+# as both develop together, the same way vgi-spark's settings.gradle.kts
+# composite-builds a sibling vgi-java checkout. CI therefore checks out BOTH
+# repos as siblings under the same workspace root, exactly mirroring local
+# dev's ~/Development/vgi-polars + ~/Development/vgi-python layout.
+#
+# Pinned (not `main`) for the same reason ~/Development/vgi's CI pins
+# VGI_FIXTURES_REF to a release tag: a protocol/fixture change landing on
+# vgi-python's main would otherwise silently flip this repo's CI red with no
+# change on this side. Bump VGI_PYTHON_REF in lockstep with real vgi-python
+# API usage changes here; override per-run via the workflow_dispatch input.
+env:
+  VGI_PYTHON_REF: v0.29.2
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+      - run: uvx ruff check src/ tests/
+
+  build:
+    name: Build & validate package metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+      # Builds against the plain `vgi-python>=...` dependency bound in
+      # pyproject.toml (PyPI), not the [tool.uv.sources] sibling-checkout dev
+      # override — proves the package a `release.yml` run would publish
+      # actually builds and has valid metadata, on every push/PR, not just
+      # at release time.
+      - name: Build (sdist + wheel)
+        run: uv build --sdist --wheel --out-dir dist .
+      - name: Validate metadata
+        run: uvx twine check dist/*
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout vgi-polars
+        uses: actions/checkout@v7
+        with:
+          path: vgi-polars
+
+      - name: Checkout vgi-python (sibling)
+        uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-python
+          ref: ${{ github.event.inputs.vgi_python_ref || env.VGI_PYTHON_REF }}
+          path: vgi-python
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      # --extra http: falcon/waitress, needed for vgi-fixture-http to serve.
+      # The workspace `dev` group (synced by default) is what actually
+      # provides the vgi-fixture-worker/vgi-fixture-http console scripts.
+      - name: Sync vgi-python
+        working-directory: vgi-python
+        run: uv sync --extra http
+
+      - name: Sync vgi-polars
+        working-directory: vgi-polars
+        run: uv sync
+
+      - name: Run tests
+        working-directory: vgi-polars
+        env:
+          VGI_PYTHON: ${{ github.workspace }}/vgi-python
+        run: uv run pytest -v --cov=vgi_polars --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: vgi-polars/coverage.xml

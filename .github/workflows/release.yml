@@ -1,0 +1,63 @@
+name: Release
+
+# Publishes vgi-polars to PyPI when a GitHub Release is published.
+#
+# Auth is PyPI Trusted Publishing (OIDC) — no API tokens. Before the first run,
+# configure a Trusted Publisher on PyPI for the `vgi-polars` project pointing at:
+#   owner:       Query-farm
+#   repository:  vgi-polars
+#   workflow:    release.yml
+#   environment: pypi
+# pyproject.toml's version must match the released tag (e.g. tag v0.1.0 ->
+# version = "0.1.0").
+#
+# Builds against the published vgi-python release on PyPI (not a local sibling
+# checkout — [tool.uv.sources]'s path override is a uv-only dev-resolution hint
+# that never reaches the built sdist/wheel's own dependency metadata, which
+# always names the plain `vgi-python>=...` version bound from pyproject.toml).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+
+      - name: Build (sdist + wheel)
+        run: uv build --sdist --wheel --out-dir dist .
+
+      - name: Validate metadata
+        run: uvx twine check dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for Trusted Publishing
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
