@@ -162,9 +162,10 @@ def _launch_tcp_worker(argv: list[str], *, idle_timeout: float = 1800.0) -> int:
 def _spawn_http_worker(extra_env: dict[str, str] | None = None):
     """Spawn `vgi-fixture-http` on a free port and yield its base URL.
 
-    Waits for it to accept connections, then yields its base URL — shared by
-    the anonymous and bearer-auth HTTP fixtures below. Skips (doesn't fail)
-    the calling fixture's tests if the binary is missing or never comes up.
+    Waits for it to actually serve requests (see the readiness-probe note
+    below), then yields its base URL — shared by the anonymous and
+    bearer-auth HTTP fixtures below. Skips (doesn't fail) the calling
+    fixture's tests if the binary is missing or never comes up.
     """
     http_bin = _vgi_python_venv() / "vgi-fixture-http"
     if not http_bin.exists():
@@ -192,16 +193,31 @@ def _spawn_http_worker(extra_env: dict[str, str] | None = None):
         t.start()
 
     base_url = f"http://127.0.0.1:{port}"
+    # A raw `socket.create_connection` only proves the listening socket is
+    # open, not that the WSGI app behind it is ready to answer a real
+    # request — confirmed live as the cause of a CI-only (never local)
+    # failure: the very first `catalog_attach` against a freshly spawned
+    # server (specifically the bearer-auth one, which each test session
+    # spawns fresh right before its first real request) got back a
+    # truncated/errored response body, surfacing as `pyarrow.lib.ArrowInvalid:
+    # Invalid IPC stream: negative continuation token` — a corrupted-looking
+    # Arrow stream that was actually just an HTTP response caught mid-startup.
+    # `http_capabilities()` (an `OPTIONS /health` probe, exempt from auth —
+    # see vgi-python's `wait_for_http_server` in `tests/_http_fixtures.py`,
+    # which this mirrors) does a real round-trip through the same app the
+    # RPC calls will hit, so "ready" here actually means ready.
+    from vgi_rpc.http import http_capabilities
+
     deadline = time.monotonic() + 15
     ready = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             break
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                ready = True
-                break
-        except OSError:
+            http_capabilities(base_url=base_url)
+            ready = True
+            break
+        except Exception:  # noqa: BLE001 - readiness probe; any failure just means "not yet"
             time.sleep(0.2)
 
     if not ready:
