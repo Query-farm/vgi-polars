@@ -943,7 +943,7 @@ dev = [
 
 [[package]]
 name = "vgi-python"
-version = "0.29.5"
+version = "0.29.6"
 source = { editable = "../vgi-python" }
 dependencies = [
     { name = "click" },

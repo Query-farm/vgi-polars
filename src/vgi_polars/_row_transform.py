@@ -28,6 +28,18 @@ single-shot special case). Still goes through `catalog._exchange_client()`,
 not `catalog.client` — `pl.defer` inherits `register_io_source`'s
 concurrent-instances hazard even though its own docs don't mention it.
 
+**Every call passes `has_finalize=False`.** A blended function never has a
+FINALIZE stage (enforced at `resolve_metadata()` — a `RowTransformFunction`
+overriding `finish()`/`finalize()` is a `TypeError` at registration).
+`Client.table_in_out_function` used to send a FINALIZE-phase `init()`
+unconditionally regardless; the Python fixture worker happens to no-op that
+gracefully, but a real non-Python worker SDK was confirmed live to reject it
+outright ("a blended row-transform function has no FINALIZE phase"),
+breaking every call against that worker. `_has_finalize_kwarg` (module-level,
+capability-guarded the same way `_SUPPORTS_PARENT_ROW_CALLBACK` is) is spread
+into every `table_in_out_function()` call below so the FINALIZE `init()` is
+never sent at all, not just tolerated when it no-ops.
+
 **Row provenance is a correctness requirement, not an optimization.** Unlike
 scan pushdown (`_source.py`'s Design Principle 1 — always locally
 re-verified, so a wrong worker claim only ever costs performance), a blended
@@ -98,7 +110,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import polars as pl
 import pyarrow as pa
@@ -119,6 +131,20 @@ RowTransformFunctionCall = Callable[..., pl.LazyFrame]
 _VGI_ARG_KEY = b"vgi_arg"
 _VGI_NAMED_VALUE = b"named"
 
+
+class _HasFinalizeKwargs(TypedDict, total=False):
+    """The `**_has_finalize_kwarg` spread's precise shape, for mypy's `**kwargs` unpacking check.
+
+    A plain `dict[str, bool]` spread can't be checked against
+    `table_in_out_function`'s heterogeneously-typed keyword parameters (mypy
+    would have to assume the dict could supply any of them) — a `TypedDict`
+    with `total=False` is what makes `**_has_finalize_kwarg` verifiable as
+    "zero or one `has_finalize: bool`, nothing else."
+    """
+
+    has_finalize: bool
+
+
 # `parent_row_callback` is a new vgi-python parameter (see this package's plan
 # doc / vgi-python's protocol.py `_decode_parent_rows`) — probe for it once at
 # import time rather than letting a raw TypeError surface from inside a
@@ -127,11 +153,21 @@ _VGI_NAMED_VALUE = b"named"
 try:
     from vgi.client.client import Client as _RuntimeClient
 
-    _SUPPORTS_PARENT_ROW_CALLBACK = (
-        "parent_row_callback" in inspect.signature(_RuntimeClient.table_in_out_function).parameters
-    )
+    _table_in_out_params = inspect.signature(_RuntimeClient.table_in_out_function).parameters
+    _SUPPORTS_PARENT_ROW_CALLBACK = "parent_row_callback" in _table_in_out_params
+    # `has_finalize=False` skips the FINALIZE init() entirely for a function
+    # that never has one -- every blended function, by construction. Found
+    # live against a real (non-Python) worker SDK: it rejects an unadvertised
+    # FINALIZE init() outright rather than the Python fixture worker's
+    # graceful no-op, so table_in_out_function() ALWAYS sending one broke
+    # interop with that SDK. `_has_finalize_kwarg` is spread into every
+    # table_in_out_function() call below via `**_has_finalize_kwarg` so an
+    # older vgi-python (predating the parameter) degrades to the old
+    # always-finalize behavior instead of a raw TypeError.
+    _has_finalize_kwarg: _HasFinalizeKwargs = {"has_finalize": False} if "has_finalize" in _table_in_out_params else {}
 except Exception:  # noqa: BLE001 - never let a capability probe break import
     _SUPPORTS_PARENT_ROW_CALLBACK = False
+    _has_finalize_kwarg = {}
 
 
 def _is_named_field(field: pa.Field[Any]) -> bool:
@@ -188,6 +224,7 @@ def _make_literal_call(
                     input=iter([input_batch]),
                     arguments=arguments,
                     settings=settings,
+                    **_has_finalize_kwarg,
                 )
             )
         except VGI_CLIENT_ERRORS as e:
@@ -298,6 +335,7 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
                     arguments=arguments,
                     settings=settings,
                     bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+                    **_has_finalize_kwarg,
                 )
             )
         except VGI_CLIENT_ERRORS as e:
@@ -395,6 +433,7 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
                         arguments=arguments,
                         settings=settings,
                         parent_row_callback=parent_rows_by_batch.append,
+                        **_has_finalize_kwarg,
                     )
                 )
             except VGI_CLIENT_ERRORS as e:

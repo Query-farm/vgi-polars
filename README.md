@@ -76,8 +76,8 @@ implementations and the protocol documentation.
 
 No local worker needed — this attaches over HTTPS to a live, public VGI worker
 serving the [USGS Earthquake Hazards Program](https://earthquake.usgs.gov/)'s
-rolling 30-day feed as an ordinary table. More live example workers (weather,
-volcanoes, and others) at [query.farm/vgi](https://query.farm/vgi/).
+rolling 30-day feed as an ordinary table (a weather example follows below).
+More live example workers at [query.farm/vgi](https://query.farm/vgi/).
 
 ```python
 import polars as pl
@@ -116,6 +116,63 @@ sent to it to reduce what crosses the wire; either way, the *complete* original
 predicate and projection are always re-applied locally after scanning too (see
 [Pushdown is an optimization, never a correctness delegation](#pushdown-is-an-optimization-never-a-correctness-delegation)
 below), so the result is identical whether or not pushdown happened to work.
+
+## Live example: weather
+
+This worker exposes no plain catalog tables at all — every function
+(`geocoding`, `forecast_hourly`, ...) is a *blended row-transform* function,
+callable either as a bare literal call or joined against an existing
+`LazyFrame`/`DataFrame` (DuckDB's `FROM t, LATERAL f(t.x)`, for Polars). Both
+shapes chain together below: a literal `geocoding` call resolves a place name
+to coordinates, then `forecast_hourly` is called *against that result*,
+correlating each output row back to the place that produced it.
+
+```python
+import polars as pl
+import vgi_polars as vp
+
+cat = vp.attach("https://vgi-open-meteo.rusty-bb6.workers.dev", name="open_meteo")
+geocoding = cat.row_transform_function("main", "geocoding")
+forecast_hourly = cat.row_transform_function("main", "forecast_hourly")
+
+# Literal call: fn(None, ...) -- no LazyFrame, just arguments.
+place = geocoding(None, "Glen Allen, VA", count=1, country_code="US")
+
+# Correlated call: fn(lf, pl.col(...), ...) -- joined against `place`'s
+# result, one forecast per input row (here, just the one place).
+forecast = forecast_hourly(
+    place,
+    pl.col("latitude"),
+    pl.col("longitude"),
+    forecast_days=1,
+    temperature_unit="fahrenheit",
+).collect()
+
+print(forecast.select("name", "time", pl.col("temperature_2m").round(1).alias("temp_f"), "weather_code").head(6))
+```
+
+```text
+shape: (6, 4)
+┌────────────┬─────────────────────────┬────────┬──────────────┐
+│ name       ┆ time                    ┆ temp_f ┆ weather_code │
+│ ---        ┆ ---                     ┆ ---    ┆ ---          │
+│ str        ┆ datetime[μs, UTC]       ┆ f64    ┆ i32          │
+╞════════════╪═════════════════════════╪════════╪══════════════╡
+│ Glen Allen ┆ 2026-08-27 00:00:00 UTC ┆ 76.4   ┆ 0            │
+│ Glen Allen ┆ 2026-08-27 01:00:00 UTC ┆ 73.8   ┆ 1            │
+│ Glen Allen ┆ 2026-08-27 02:00:00 UTC ┆ 73.1   ┆ 0            │
+│ Glen Allen ┆ 2026-08-27 03:00:00 UTC ┆ 72.7   ┆ 0            │
+│ Glen Allen ┆ 2026-08-27 04:00:00 UTC ┆ 71.4   ┆ 2            │
+│ Glen Allen ┆ 2026-08-27 05:00:00 UTC ┆ 71.0   ┆ 0            │
+└────────────┴─────────────────────────┴────────┴──────────────┘
+```
+
+`place` is itself a `LazyFrame` — `forecast_hourly` never sees raw coordinates,
+it sees the result of another VGI call, and every one of `place`'s own columns
+(`name`, `country`, `population`, ...) rides along onto each forecast row for
+free. Swap in `forecast_daily`, `historical_hourly`, `marine_hourly`, or any
+of the worker's other functions the same way — one registration serves the
+literal, column, and correlated-join call shapes uniformly.
 
 ## Pushdown is an optimization, never a correctness delegation
 
