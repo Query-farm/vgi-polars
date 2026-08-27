@@ -46,9 +46,48 @@ def test_translate_predicate_is_null() -> None:
 
 
 def test_translate_predicate_unsupported_returns_none() -> None:
-    # is_in's list literal serializes as an opaque binary blob (Tier 2, not
-    # yet supported) — translate_predicate must decline cleanly, not raise.
-    assert translate_predicate(pl.col("n").is_in([1, 2, 3]), ["n"]) is None
+    # `OR` isn't part of the supported grammar (only a top-level AND chain
+    # is) — translate_predicate must decline cleanly, not raise.
+    assert translate_predicate((pl.col("n") > 3) | (pl.col("n") < 1), ["n"]) is None
+
+
+def test_translate_predicate_is_in() -> None:
+    ipc_bytes = translate_predicate(pl.col("status").is_in(["active", "pending", "review"]), ["status", "n"])
+    assert ipc_bytes is not None
+
+    batch = pa.ipc.open_stream(ipc_bytes).read_next_batch()
+    row = batch.to_pydict()
+    assert row["filter_spec"] == ['[{"column_name": "status", "column_index": 0, "type": "in", "value_ref": 0}]']
+    # A single row whose value is the list of candidates, per the wire spec's
+    # `_val_0: ["active", "pending", "review"]` example — not one row per
+    # candidate value.
+    assert row["value_0"] == [["active", "pending", "review"]]
+    assert pa.types.is_list(batch.schema.field("value_0").type)
+
+
+def test_translate_predicate_is_in_nulls_equal_declines() -> None:
+    """`nulls_equal=True` changes NULL-matching semantics the plain wire IN filter can't express.
+
+    Declines rather than risk a worker excluding rows that should have
+    matched (falls back to local filtering, per Design Principle 1).
+    """
+    assert translate_predicate(pl.col("n").is_in([1, 2, 3], nulls_equal=True), ["n"]) is None
+
+
+def test_translate_predicate_is_in_composed_with_and() -> None:
+    pred = pl.col("a").is_in([1, 2, 3]) & (pl.col("b") > 5)
+    ipc_bytes = translate_predicate(pred, ["a", "b"])
+    assert ipc_bytes is not None
+
+    row = pa.ipc.open_stream(ipc_bytes).read_next_batch().to_pydict()
+    assert row["filter_spec"] == [
+        (
+            '[{"column_name": "a", "column_index": 0, "type": "in", "value_ref": 0}, '
+            '{"column_name": "b", "column_index": 1, "type": "constant", "op": "gt", "value_ref": 1}]'
+        )
+    ]
+    assert row["value_0"] == [[1, 2, 3]]
+    assert row["value_1"] == [5]
 
 
 def _pushed_value(pred: pl.Expr, columns: list[str]):
@@ -102,6 +141,22 @@ def test_filter_pushdown_end_to_end(catalog: vp.VgiCatalog) -> None:
     t = catalog.table("data", "filter_echo_table")
     out = t.scan().filter((pl.col("n") > 3) & (pl.col("n") < 8)).collect()
     assert sorted(out["n"].to_list()) == [4, 5, 6, 7]
+
+
+def test_filter_pushdown_end_to_end_is_in(catalog: vp.VgiCatalog) -> None:
+    """An `is_in` predicate against a real filter-pushdown worker produces correct rows AND was actually sent.
+
+    `filter_echo_table` echoes the SQL-like rendering of whatever filters it
+    received into its own `pushed_filters` output column — asserting on its
+    content (not just the final row set) proves the `is_in` filter actually
+    reached the worker, rather than only being locally correct regardless
+    (which the final row set alone would be either way, per Design
+    Principle 1).
+    """
+    t = catalog.table("data", "filter_echo_table")
+    out = t.scan().filter(pl.col("n").is_in([4, 6, 91])).collect()
+    assert sorted(out["n"].to_list()) == [4, 6, 91]
+    assert set(out["pushed_filters"].to_list()) == {"n IN (4, 6, 91)"}
 
 
 def test_local_refilter_survives_a_worker_that_ignores_pushdown(catalog: vp.VgiCatalog, monkeypatch) -> None:

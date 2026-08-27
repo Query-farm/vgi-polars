@@ -11,10 +11,13 @@ predicate, or one of its conjuncts, is simply not pushed, never an error.
 Supported grammar (deliberately small, matching this repo's own C++ client's
 `branch_filter` binder restriction to "col OP const, AND"): a top-level chain of
 `AND`ed comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) between a bare column
-reference and a scalar literal, plus `is_null()`/`is_not_null()`. `OR`, `is_in`
-(whose list literal serializes as an opaque binary blob, not plain JSON — see
-`meta.serialize()`), string/function predicates, and anything else are left
-untranslated and simply fall through to local filtering.
+reference and a scalar literal, plus `is_null()`/`is_not_null()` and
+`col.is_in([...])` (default `nulls_equal=False` only — see `_translate_is_in`).
+`is_in`'s needle list doesn't serialize as plain JSON like other literals — it's a
+complete Arrow IPC stream embedded as a raw byte list (see `meta.serialize()`) —
+`_translate_is_in` decodes it via `pyarrow.ipc`. `OR`, string/function predicates,
+and anything else are left untranslated and simply fall through to local
+filtering.
 
 VGI wire format reference: vgi-python's `docs/filter-pushdown.md` +
 `vgi/table_filter_pushdown.py`. Recipe for building the IPC bytes taken from
@@ -24,6 +27,7 @@ VGI wire format reference: vgi-python's `docs/filter-pushdown.md` +
 from __future__ import annotations
 
 import datetime
+import io
 import json
 from decimal import Decimal
 from typing import Any
@@ -98,7 +102,8 @@ def _literal_value(node: dict[str, Any]) -> tuple[Any, bool]:
     types are unambiguous at construction, unlike a bare `int`/`float`/`str`).
 
     Returns (value, ok) — ok is False for shapes we don't understand (e.g. the
-    opaque binary-encoded list literal `is_in` uses), never raises.
+    IPC-encoded list literal `is_in` uses, which `_translate_is_in`/
+    `_decode_is_in_values` decode separately), never raises.
     """
     literal = node.get("Literal")
     if not isinstance(literal, dict):
@@ -195,6 +200,77 @@ def _translate_null_check(node: dict[str, Any]) -> tuple[str, str] | None:
     return col, "is_null" if boolean == "IsNull" else "is_not_null"
 
 
+def _decode_is_in_values(node: dict[str, Any]) -> pa.Array[Any] | None:
+    """Decode the RHS needle-list literal of an `is_in` `Function` node.
+
+    Unlike every other literal shape `_literal_value` handles, Polars
+    serializes an `is_in([...])` needle list not as plain JSON but as a
+    *complete Arrow IPC stream*, embedded as a raw list of ints (byte values)
+    under `Literal.Scalar.List` (confirmed empirically — the raw bytes start
+    with the Arrow IPC continuation marker `0xFFFFFFFF`). Decoding it yields a
+    RecordBatch with one unnamed column and one row per candidate value (NOT
+    a single row containing a list) — the flat array of candidates is
+    `batch.column(0)`.
+
+    Returns `None` on any unexpected/malformed shape (missing keys, a
+    `List` that isn't a byte list, IPC bytes that don't decode, an
+    unexpected number of columns), never raises.
+    """
+    literal = node.get("Literal")
+    if not isinstance(literal, dict):
+        return None
+    scalar = literal.get("Scalar")
+    if not isinstance(scalar, dict):
+        return None
+    raw_list = scalar.get("List")
+    if not isinstance(raw_list, list):
+        return None
+    try:
+        ipc_bytes = bytes(raw_list)
+        batch = pa.ipc.open_stream(io.BytesIO(ipc_bytes)).read_next_batch()
+    except Exception:  # noqa: BLE001 - deliberately never raises, see docstring
+        return None
+    if batch.num_columns != 1:
+        return None
+    return batch.column(0)
+
+
+def _translate_is_in(node: dict[str, Any]) -> tuple[str, pa.Array[Any]] | None:
+    """Match `col.is_in([...])` -> (column_name, candidate_values_array).
+
+    Only translates the default `nulls_equal=False` case. `nulls_equal=True`
+    changes Polars' NULL semantics so that a NULL needle matches NULL haystack
+    values — the wire format's plain "col IN (v1, v2, v3)" set-membership
+    filter has no way to express that, and a worker applying it with ordinary
+    SQL-style IN semantics would silently drop rows that should have matched
+    (a real correctness risk, not merely a missed optimization, since a
+    worker that auto-applies pushed filters never returns those rows for the
+    caller's local re-filter to recover) — so that case is deliberately left
+    untranslated rather than risk it.
+    """
+    func = node.get("Function")
+    if not isinstance(func, dict):
+        return None
+    inputs = func.get("input")
+    function = func.get("function")
+    boolean = function.get("Boolean") if isinstance(function, dict) else None
+    is_in = boolean.get("IsIn") if isinstance(boolean, dict) else None
+    if not isinstance(inputs, list) or len(inputs) != 2 or not isinstance(is_in, dict):
+        return None
+    if is_in.get("nulls_equal"):
+        return None
+
+    col = _column_name(inputs[0])
+    if col is None:
+        return None
+
+    values = _decode_is_in_values(inputs[1])
+    if values is None:
+        return None
+
+    return col, values
+
+
 def translate_predicate(predicate: pl.Expr, column_names: list[str]) -> bytes | None:
     """Best-effort translate `predicate` into VGI `pushdown_filters` IPC bytes.
 
@@ -247,9 +323,31 @@ def translate_predicate(predicate: pl.Expr, column_names: list[str]) -> bytes | 
             )
             continue
 
-        # Unsupported conjunct (OR, is_in, function/string predicate, ...) —
-        # just skip it. Correctness is guaranteed by the caller's local
-        # re-filter regardless of what does or doesn't get pushed.
+        is_in = _translate_is_in(conjunct)
+        if is_in is not None:
+            col, values = is_in
+            if col not in column_names:
+                continue
+            value_ref = len(value_arrays)
+            # Wire spec: the value_ref column is a list-typed array with a
+            # SINGLE row whose value is the list of candidates (e.g.
+            # `_val_0: ["active", "pending", "review"]`) — not one row per
+            # candidate, unlike every other value_ref column in this file.
+            offsets = pa.array([0, len(values)], type=pa.int32())
+            value_arrays.append(pa.ListArray.from_arrays(offsets, values))
+            specs.append(
+                {
+                    "column_name": col,
+                    "column_index": column_names.index(col),
+                    "type": "in",
+                    "value_ref": value_ref,
+                }
+            )
+            continue
+
+        # Unsupported conjunct (OR, function/string predicate, ...) — just
+        # skip it. Correctness is guaranteed by the caller's local re-filter
+        # regardless of what does or doesn't get pushed.
 
     if not specs:
         return None

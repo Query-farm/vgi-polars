@@ -63,6 +63,19 @@ loss, never a correctness one. Do not weaken this without a very good reason —
   (`test_translate_predicate_*`) and the one an actual scan receives are NOT
   interchangeable for testing this code path — the end-to-end tests in
   `test_scan_filter.py` exist because the unit tests alone would have missed this.
+- **`col.is_in([...])`'s needle list doesn't serialize as plain JSON, unlike every
+  other literal.** It comes across as a complete Arrow IPC stream embedded as a raw
+  list of ints (byte values) under `Literal.Scalar.List` — decoding it (`pa.ipc.
+  open_stream`) yields a RecordBatch with one unnamed column and *one row per
+  candidate value*, not a single row holding a list. `_translate_is_in`/
+  `_decode_is_in_values` in `_filter_translate.py` handle the decode; the wire
+  format's own `value_ref` column is then built the other way around — a single
+  row whose value IS the list of candidates (`pa.ListArray.from_arrays`), matching
+  `docs/filter-pushdown.md`'s `_val_0: ["active", "pending", "review"]` example.
+  Only the default `nulls_equal=False` case is translated — `nulls_equal=True`
+  makes a NULL needle match NULL haystack values, which the plain "col IN (...)"
+  wire filter can't express, so that case is left untranslated rather than risk a
+  worker that auto-applies filters silently dropping rows that should have matched.
 - **The table a catalog declares (`TableInfo.columns`) and what its resolved scan
   function actually names its output columns can differ.** `data.numbers` declares
   column `value`; the function it resolves to emits `n`. `_source.py` renames each
@@ -147,7 +160,7 @@ the single most important rule for extending vgi-polars.**
 **Implemented (Tier 1):** catalog attach/detach, schema/table introspection incl.
 per-column statistics (`catalog.py`, `table.py`), lazy/eager table scan with
 best-effort projection + filter pushdown incl. Date/Datetime/Duration/Binary/
-Decimal literals (`_source.py`, `_filter_translate.py`), `required_filters`
+Decimal literals and `is_in` (`_source.py`, `_filter_translate.py`), `required_filters`
 cost-safety enforcement (a table declaring `TableInfo.required_filters` raises
 `VgiPolarsError` before scanning if the query's predicate doesn't reference at
 least one column from every AND'd OR-group — `_check_required_filters` in
@@ -323,8 +336,7 @@ split request, never a raw `AttributeError`/`TypeError`, and an ordinary
 scan of a single-branch, non-cacheable, non-split table is completely
 unaffected either way).
 
-**Deliberately not yet implemented (Tier 2):** `is_in` filter pushdown (Polars serializes
-list literals as an opaque binary blob, not plain JSON — needs its own decode work);
+**Deliberately not yet implemented (Tier 2):**
 writes (`TableInfo.supports_insert` etc. are read but unused — read-only connector,
 matching `vgi-spark`'s stated v1 non-goal); scalar per-value memoization *across*
 chunks/queries (the client-side `vgi_exchange_input_dedup` mirror above is implemented

@@ -88,7 +88,7 @@ was pushed down. Pushdown here only ever affects performance, never correctness.
 
 - Catalog attach/detach with versioning introspection
 - Schema and table discovery, incl. per-column statistics
-- Table scan (eager + lazy) with best-effort projection/filter pushdown
+- Table scan (eager + lazy) with best-effort projection/filter pushdown, incl. `is_in`
 - `required_filters` cost-safety enforcement
 - Sequential split-scan redemption
 - Transparent multi-branch-table scanning (`pl.concat` under the hood)
@@ -102,7 +102,6 @@ was pushed down. Pushdown here only ever affects performance, never correctness.
 **Not implemented:**
 
 - Writes
-- `is_in` filter pushdown
 - Companion-catalog federation
 - Per-table time-travel discovery
 - The `container://`/`github://`/`launch:` transport schemes (a substantially
