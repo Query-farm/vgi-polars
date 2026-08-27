@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from vgi.catalog.catalog_interface import AttachOpaqueData
 
     from vgi_polars._aggregate import AggregateFunction
+    from vgi_polars._row_transform import RowTransformFunctionCall
     from vgi_polars._scalar import ScalarFunctionCall
     from vgi_polars._table_in_out import TableInOutFunction
     from vgi_polars.table import VgiTable
@@ -262,6 +263,18 @@ class VgiCatalog:
         from vgi_polars._aggregate import make_aggregate_function
 
         return make_aggregate_function(self, schema_name, name)
+
+    def row_transform_function(self, schema_name: str, name: str) -> RowTransformFunctionCall:
+        """Return a callable for a blended row-transform function (`RowTransformFunction`).
+
+        The returned callable has signature `fn(lf: pl.LazyFrame | None =
+        None, *args, settings=None, dedup=True, **named_args) -> pl.LazyFrame`
+        (see `_row_transform.py`). `lf=None` — a bare literal call — is not
+        yet supported.
+        """
+        from vgi_polars._row_transform import make_row_transform_function
+
+        return make_row_transform_function(self, schema_name, name)
 
     def detach(self) -> None:
         """Detach from the catalog and close the underlying client(s).
