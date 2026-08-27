@@ -59,30 +59,36 @@ row count at all.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
-from vgi.catalog.catalog_interface import FunctionStability, SchemaObjectType
+from vgi.catalog.catalog_interface import FunctionInfo, FunctionStability, SchemaObjectType
 
 from vgi_polars._arguments import is_const_field, to_scalar
+from vgi_polars._polars_compat import arrow_to_df, arrow_to_series
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
     from vgi_polars.catalog import VgiCatalog
 
+#: The callable `VgiCatalog.scalar_function` returns — see `make_scalar_function`.
+ScalarFunctionCall = Callable[..., pl.Expr]
+
 
 def _dedup_positions(batch: pa.RecordBatch) -> tuple[list[int], list[int]] | None:
-    """Return `(distinct_positions, inverse)` if deduping `batch`'s rows is
-    both possible (every row's values are hashable) and worthwhile (fewer
-    distinct rows than total rows); `None` otherwise, in which case the
-    caller ships the batch unmodified. See module docstring's "Per-chunk
-    input dedup" section."""
+    """Return `(distinct_positions, inverse)` if deduping `batch`'s rows is possible and worthwhile.
+
+    Deduping is possible if every row's values are hashable, and worthwhile if there are
+    fewer distinct rows than total rows. Returns `None` otherwise, in which case the caller
+    ships the batch unmodified. See module docstring's "Per-chunk input dedup" section.
+    """
     if batch.num_rows == 0:
         return None
     try:
-        rows = pl.from_arrow(batch).rows()
+        rows = arrow_to_df(batch).rows()
         seen: dict[tuple[Any, ...], int] = {}
         distinct_positions: list[int] = []
         inverse: list[int] = []
@@ -100,15 +106,16 @@ def _dedup_positions(batch: pa.RecordBatch) -> tuple[list[int], list[int]] | Non
     return distinct_positions, inverse
 
 
-def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str):
-    """Return a callable for the scalar function `schema_name.name`. Pass a
-    `pl.Expr` for each array parameter and a plain Python value for each
-    constant parameter, in the function's declared argument order. The
-    `FunctionInfo` (argument/output schema) is resolved on first use and
-    cached."""
-    cache: dict[str, object] = {}
+def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str) -> ScalarFunctionCall:
+    """Return a callable for the scalar function `schema_name.name`.
 
-    def _function_info():
+    Pass a `pl.Expr` for each array parameter and a plain Python value for each constant
+    parameter, in the function's declared argument order. The `FunctionInfo`
+    (argument/output schema) is resolved on first use and cached.
+    """
+    cache: dict[str, FunctionInfo] = {}
+
+    def _function_info() -> FunctionInfo:
         if "info" not in cache:
             try:
                 # Catalog-metadata call — the shared client, not the per-thread
@@ -131,9 +138,7 @@ def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str):
         arg_schema = pa.ipc.read_schema(pa.py_buffer(info.arguments))
         out_schema = pa.ipc.read_schema(pa.py_buffer(info.output_schema))
         if len(args) != len(arg_schema.names):
-            raise VgiPolarsError(
-                f"{schema_name}.{name} expects {len(arg_schema.names)} argument(s), got {len(args)}"
-            )
+            raise VgiPolarsError(f"{schema_name}.{name} expects {len(arg_schema.names)} argument(s), got {len(args)}")
 
         const_fields = [(i, f) for i, f in enumerate(arg_schema) if is_const_field(f)]
         array_fields = [(i, f) for i, f in enumerate(arg_schema) if not is_const_field(f)]
@@ -156,14 +161,12 @@ def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str):
         array_schema = pa.schema([f for _, f in array_fields])
 
         out_field = out_schema.field(0)
-        return_dtype = pl.from_arrow(pa.array([], type=out_field.type)).dtype
+        return_dtype = arrow_to_series(pa.array([], type=out_field.type)).dtype
         dedup_safe = dedup and info.stability != FunctionStability.VOLATILE
 
         def _apply(struct_series: pl.Series) -> pl.Series:
             cols = struct_series.struct.unnest()
-            arrays = [
-                cols.to_series(i).to_arrow().cast(array_schema.field(i).type) for i in range(len(array_fields))
-            ]
+            arrays = [cols.to_series(i).to_arrow().cast(array_schema.field(i).type) for i in range(len(array_fields))]
             batch = pa.RecordBatch.from_arrays(arrays, schema=array_schema)
 
             inverse: list[int] | None = None
@@ -191,7 +194,7 @@ def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str):
             if not out_batches:
                 return pl.Series(name=out_field.name, values=[], dtype=return_dtype)
             out_table = pa.Table.from_batches(out_batches)
-            result = pl.from_arrow(out_table)[out_table.column_names[0]]
+            result = arrow_to_df(out_table)[out_table.column_names[0]]
             if inverse is not None:
                 result = result[pl.Series(inverse)]
             return result

@@ -1,9 +1,11 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""The core catalog/scan/scalar paths over HTTP transport, mirroring the
-subprocess-transport tests — VGI's client-side surface is transport-agnostic,
-so these are deliberately a small subset (smoke coverage), not a duplicate of
-the full subprocess suite."""
+"""The core catalog/scan/scalar paths over HTTP transport, mirroring the subprocess-transport tests.
+
+VGI's client-side surface is transport-agnostic, so these are deliberately
+a small subset (smoke coverage), not a duplicate of the full subprocess
+suite.
+"""
 
 from __future__ import annotations
 

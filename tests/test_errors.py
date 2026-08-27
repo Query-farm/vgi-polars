@@ -1,9 +1,11 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""vgi-python's two unrelated exception types (`ClientError` for exchange
-RPCs, `CatalogClientError` for everything through `_catalog_connect()`) are
-never leaked to a vgi-polars caller — every call site re-raises
-`VgiPolarsError`. See `errors.py`'s `VGI_CLIENT_ERRORS`."""
+"""vgi-python's two unrelated exception types are never leaked to a vgi-polars caller.
+
+`ClientError` (for exchange RPCs) and `CatalogClientError` (for everything
+through `_catalog_connect()`) are always re-raised as `VgiPolarsError` at
+every call site. See `errors.py`'s `VGI_CLIENT_ERRORS`.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ def test_vgi_client_errors_covers_both_unrelated_exception_types() -> None:
     # needs both entries, not just one that happens to be a base class.
     assert not issubclass(ClientError, CatalogClientError)
     assert not issubclass(CatalogClientError, ClientError)
-    assert VGI_CLIENT_ERRORS == (ClientError, CatalogClientError)
+    assert (ClientError, CatalogClientError) == VGI_CLIENT_ERRORS
 
 
 def test_bad_worker_command_raises_vgipolars_error() -> None:
@@ -44,13 +46,15 @@ def test_unknown_table_raises_vgipolars_error(catalog: vp.VgiCatalog) -> None:
 
 
 class _FakeTableForScanFunction:
-    """Duck-typed stand-in for `VgiTable`, implementing only what
-    `make_io_source` actually calls on `table`, so a scan-function *call*
-    (`generator_exception`) can be exercised directly without it being
-    wrapped in a catalog `Table()` entry — `generator_exception` is a bare
-    schema function in vgi-fixture-worker, not a catalog table, and
-    vgi-polars' public API has no "scan an arbitrary function with args"
-    entry point (a real, documented gap — see CLAUDE.md)."""
+    """Duck-typed stand-in for `VgiTable`, implementing only what `make_io_source` actually calls on `table`.
+
+    So a scan-function *call* (`generator_exception`) can be exercised
+    directly without it being wrapped in a catalog `Table()` entry —
+    `generator_exception` is a bare schema function in vgi-fixture-worker,
+    not a catalog table, and vgi-polars' public API has no "scan an
+    arbitrary function with args" entry point (a real, documented gap —
+    see CLAUDE.md).
+    """
 
     def __init__(self, catalog: vp.VgiCatalog, function_name: str, fail_after: int) -> None:
         self._catalog = catalog
@@ -79,10 +83,12 @@ class _FakeTableForScanFunction:
 
 
 def test_mid_stream_worker_error_raises_vgipolars_error_not_silent_truncation(catalog: vp.VgiCatalog) -> None:
-    """`generator_exception(fail_after)` yields `fail_after` good batches
-    then raises — proves a worker failure *partway through* a scan surfaces
-    as `VgiPolarsError` (via `_source.py`'s try/except around the exchange
-    generator loop), not a silently truncated result."""
+    """`generator_exception(fail_after)` yields `fail_after` good batches then raises.
+
+    Proves a worker failure *partway through* a scan surfaces as
+    `VgiPolarsError` (via `_source.py`'s try/except around the exchange
+    generator loop), not a silently truncated result.
+    """
     fake_table = _FakeTableForScanFunction(catalog, "generator_exception", fail_after=2)
     io_source = make_io_source(fake_table, pa.schema([pa.field("n", pa.int64())]))
 

@@ -1,7 +1,6 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Minimal table-function result cache — in-memory, TTL-based,
-producer-mode (whole-scan) only.
+"""Minimal table-function result cache — in-memory, TTL-based, producer-mode (whole-scan) only.
 
 Mirrors the smallest slice of the DuckDB C++ extension's own much larger
 `vgi_result_cache.cpp` (see that repo's CLAUDE.md "Table-Function Result
@@ -62,9 +61,11 @@ class _CacheEntry:
 
 
 class ResultCache:
-    """Process-wide, in-memory, thread-safe TTL cache of raw (pre-local-
-    filter) table-function result batches. One instance is enough — no
-    per-catalog state to isolate beyond what the key already encodes."""
+    """Process-wide, in-memory, thread-safe TTL cache of raw table-function result batches.
+
+    Batches are cached pre-local-filter. One instance is enough — no per-catalog state to
+    isolate beyond what the key already encodes.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -95,12 +96,14 @@ class ResultCache:
 
 
 def parse_cache_control(metadata: Any) -> float | None:
-    """Return the freshness TTL in seconds if `metadata` (a batch's
-    `custom_metadata`, or `None`) advertises cacheability — `None` if it
-    doesn't, is `no_store`, or is transaction-scoped (unsupported here, see
-    module docstring). `vgi.cache.expires` (an absolute RFC3339 timestamp,
-    the alternative to `ttl`) is not parsed in this minimal slice — only
-    `ttl` opts in."""
+    """Return the freshness TTL in seconds if `metadata` advertises cacheability, else `None`.
+
+    `metadata` is a batch's `custom_metadata`, or `None`. The return value is `None` if
+    `metadata` doesn't advertise cacheability, is `no_store`, or is transaction-scoped
+    (unsupported here, see module docstring). `vgi.cache.expires` (an absolute RFC3339
+    timestamp, the alternative to `ttl`) is not parsed in this minimal slice — only `ttl`
+    opts in.
+    """
     if metadata is None:
         return None
     md = dict(metadata)

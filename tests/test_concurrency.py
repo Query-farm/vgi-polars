@@ -30,9 +30,11 @@ import vgi_polars as vp
 
 
 def test_concurrent_scalar_calls_are_correct(worker_location: str) -> None:
-    """N threads sharing one VgiCatalog, each calling the same scalar function
-    concurrently, must all get correct results — the exact scenario that
-    corrupted every call before the Phase 0 fix."""
+    """N threads sharing one VgiCatalog, each calling the same scalar function concurrently.
+
+    Must all get correct results — the exact scenario that corrupted every
+    call before the Phase 0 fix.
+    """
     n = 8
     results: dict[int, int] = {}
     errors: list[tuple[int, BaseException]] = []
@@ -63,11 +65,13 @@ def test_concurrent_scalar_calls_are_correct(worker_location: str) -> None:
 
 
 def test_concurrent_table_scans_of_the_same_catalog_are_correct(worker_location: str) -> None:
-    """N threads sharing one VgiCatalog, each independently scanning + filtering
-    the same table concurrently, must all get correct results — the io_source
-    analogue of the scalar test above (multiple concurrent generator instances
-    of logically-the-same scan is the case Polars itself produces for
-    self-joins/concat/collect_all)."""
+    """N threads sharing one VgiCatalog, each independently scanning + filtering the same table concurrently.
+
+    Must all get correct results — the io_source analogue of the scalar
+    test above (multiple concurrent generator instances of
+    logically-the-same scan is the case Polars itself produces for
+    self-joins/concat/collect_all).
+    """
     n = 4
     results: dict[int, list[int]] = {}
     errors: list[tuple[int, BaseException]] = []
@@ -97,10 +101,12 @@ def test_concurrent_table_scans_of_the_same_catalog_are_correct(worker_location:
 
 
 def test_concurrent_catalog_metadata_calls_are_correct(worker_location: str) -> None:
-    """Catalog-metadata RPCs (schemas/table_get/schema_contents/...) go through
-    the ONE shared `catalog.client`, not a per-thread exchange client — verify
-    (not assume) that CatalogClientMixin's "short-lived connection per call"
-    design is actually safe for concurrent use, per catalog.py's docstring."""
+    """Catalog-metadata RPCs (schemas/table_get/schema_contents/...) go through the ONE shared `catalog.client`.
+
+    Not a per-thread exchange client — verify (not assume) that
+    CatalogClientMixin's "short-lived connection per call" design is
+    actually safe for concurrent use, per catalog.py's docstring.
+    """
     n = 8
     results: dict[int, list[str]] = {}
     errors: list[tuple[int, BaseException]] = []
@@ -129,10 +135,13 @@ def test_concurrent_catalog_metadata_calls_are_correct(worker_location: str) -> 
 
 
 def test_exchange_client_is_one_per_thread(worker_location: str) -> None:
-    """Direct unit check of the pooling contract: the same thread gets the same
-    `Client` back; different threads get different ones; detach() stops all of
-    them (verified by attempting a call on a post-detach client and expecting
-    it to fail, since a stopped Client can't serve requests)."""
+    """Direct unit check of the pooling contract.
+
+    The same thread gets the same `Client` back; different threads get
+    different ones; detach() stops all of them (verified by attempting a
+    call on a post-detach client and expecting it to fail, since a stopped
+    Client can't serve requests).
+    """
     with vp.attach(worker_location, name="example") as cat:
         same_thread_a = cat._exchange_client()
         same_thread_b = cat._exchange_client()
@@ -150,14 +159,19 @@ def test_exchange_client_is_one_per_thread(worker_location: str) -> None:
 
 
 def test_no_secrets_needed_for_exchange_client_reuse(worker_location: str) -> None:
-    """A per-thread exchange client is immediately usable with no re-attach —
-    confirms `Client.table_function`/`scalar_function` genuinely don't need
-    `attach_opaque_data`, so `_exchange_client()`'s "no catalog_attach" design
-    (see catalog.py's `client_factory` docstring) isn't silently relying on
-    some other implicit session state that happens to work by accident."""
+    """A per-thread exchange client is immediately usable with no re-attach.
+
+    Confirms `Client.table_function`/`scalar_function` genuinely don't need
+    `attach_opaque_data`, so `_exchange_client()`'s "no catalog_attach"
+    design (see catalog.py's `client_factory` docstring) isn't silently
+    relying on some other implicit session state that happens to work by
+    accident.
+    """
     with vp.attach(worker_location, name="example") as cat:
         fresh = cat._exchange_client()
-        batch = pa.RecordBatch.from_arrays([pa.array([1], type=pa.int64())], schema=pa.schema([pa.field("value", pa.int64())]))
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([1], type=pa.int64())], schema=pa.schema([pa.field("value", pa.int64())])
+        )
         out = list(
             fresh.scalar_function(
                 function_name="multiply",

@@ -25,13 +25,13 @@ VGI_CONST_KEY = b"vgi_const"
 VGI_CONST_TRUE = b"true"
 
 
-def is_const_field(field: pa.Field) -> bool:
+def is_const_field(field: pa.Field[Any]) -> bool:
     """Whether a declared argument field is a bind-time `ConstParam`."""
     md = field.metadata or {}
     return md.get(VGI_CONST_KEY) == VGI_CONST_TRUE
 
 
-def to_scalar(value: Any, arrow_type: pa.DataType | None = None) -> pa.Scalar[Any] | None:
+def to_scalar(value: Any, arrow_type: pa.DataType | None = None) -> pa.Scalar[Any]:
     """Convert a plain Python value (or an already-built `pa.Scalar`) to a `pa.Scalar`.
 
     Args:
@@ -39,6 +39,9 @@ def to_scalar(value: Any, arrow_type: pa.DataType | None = None) -> pa.Scalar[An
         arrow_type: Optional target Arrow type (e.g. decoded from a function's
             declared argument schema) so the value binds to the declared type
             instead of pyarrow's inferred default (`int` -> `int64`, etc.).
+
+    Returns:
+        The value as a `pa.Scalar`, cast/typed to `arrow_type` when given.
 
     """
     if value is None:
@@ -63,13 +66,15 @@ def build_arguments(
         positional_types: Optional per-position Arrow types, parallel to `positional`.
         named_types: Optional per-name Arrow types.
 
+    Returns:
+        An `Arguments` with every value converted to a `pa.Scalar`.
+
     """
     if positional_types is not None and len(positional_types) != len(positional):
         raise ValueError("positional_types must be the same length as positional")
 
     pos_scalars = tuple(
-        to_scalar(v, positional_types[i] if positional_types is not None else None)
-        for i, v in enumerate(positional)
+        to_scalar(v, positional_types[i] if positional_types is not None else None) for i, v in enumerate(positional)
     )
     named_scalars = None
     if named:

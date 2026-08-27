@@ -44,14 +44,16 @@ a `pl.DataFrame`; there's no lazy `map_batches(schema=...)` to pre-declare.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
-from vgi.catalog.catalog_interface import SchemaObjectType
+from vgi.catalog.catalog_interface import FunctionInfo, SchemaObjectType
 
 from vgi_polars._arguments import is_const_field, to_scalar
+from vgi_polars._polars_compat import arrow_to_df
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -59,17 +61,23 @@ if TYPE_CHECKING:
 
     from vgi_polars.catalog import VgiCatalog
 
+#: The callable `VgiCatalog.aggregate_function` returns — see `make_aggregate_function`.
+AggregateFunction = Callable[..., pl.DataFrame]
 
-def make_aggregate_function(catalog: VgiCatalog, schema_name: str, name: str):
-    """Return a callable `fn(df: pl.DataFrame, *args, group_by=(), settings=None,
-    secrets=None) -> pl.DataFrame` for the aggregate function `schema_name.name`.
-    `*args` are the function's `ConstParam` arguments, in declared order (e.g.
+
+def make_aggregate_function(catalog: VgiCatalog, schema_name: str, name: str) -> AggregateFunction:
+    """Return a callable for the aggregate function `schema_name.name`.
+
+    The returned callable has the signature `fn(df: pl.DataFrame, *args,
+    group_by=(), settings=None, secrets=None) -> pl.DataFrame`. `*args` are the
+    function's `ConstParam` arguments, in declared order (e.g.
     `vgi_percentile(df, 0.5, group_by=["cat"])`). Every non-`group_by` column
     of `df` becomes a value column, in schema order. The `FunctionInfo`
-    (argument schema) is resolved on first use and cached."""
-    cache: dict[str, object] = {}
+    (argument schema) is resolved on first use and cached.
+    """
+    cache: dict[str, FunctionInfo] = {}
 
-    def _function_info():
+    def _function_info() -> FunctionInfo:
         if "info" not in cache:
             try:
                 # Catalog-metadata call — the shared client, not the per-thread
@@ -81,7 +89,12 @@ def make_aggregate_function(catalog: VgiCatalog, schema_name: str, name: str):
                 )
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
-            info = next((i for i in infos if i.name == name), None)
+            # `schema_contents`'s overloads don't declare a `FunctionInfo`
+            # return for `type=AGGREGATE_FUNCTION` specifically (only
+            # SCALAR_FUNCTION/TABLE_FUNCTION are — a vgi-python overload gap,
+            # not a runtime one: an aggregate listing is `FunctionInfo` too),
+            # so the general overload's union return needs narrowing here.
+            info = next((i for i in infos if isinstance(i, FunctionInfo) and i.name == name), None)
             if info is None:
                 raise VgiPolarsError(f"aggregate function not found: {schema_name}.{name}")
             cache["info"] = info
@@ -126,6 +139,6 @@ def make_aggregate_function(catalog: VgiCatalog, schema_name: str, name: str):
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
 
-        return pl.from_arrow(pa.Table.from_batches([out_batch]))
+        return arrow_to_df(pa.Table.from_batches([out_batch]))
 
     return call

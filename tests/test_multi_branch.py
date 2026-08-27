@@ -1,12 +1,14 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Multi-branch tables (`VgiTable.scan()` → `_multi_branch.scan_multi_branch`)
-— against the real `data.multi_branch_*` fixtures (`vgi/_test_fixtures/
-worker.py`), which needed a vgi-python fix first: `Client` had no
-`table_scan_branches_get` at all, so a multi-branch table was invisible to
-any non-DuckDB caller — worse, scanning one through the old
-`table_scan_function_get`-only path silently returned only its first branch.
-See CLAUDE.md's "Multi-branch tables" section."""
+"""Multi-branch tables (`VgiTable.scan()` → `_multi_branch.scan_multi_branch`).
+
+Tested against the real `data.multi_branch_*` fixtures
+(`vgi/_test_fixtures/worker.py`), which needed a vgi-python fix first:
+`Client` had no `table_scan_branches_get` at all, so a multi-branch table
+was invisible to any non-DuckDB caller — worse, scanning one through the
+old `table_scan_function_get`-only path silently returned only its first
+branch. See CLAUDE.md's "Multi-branch tables" section.
+"""
 
 from __future__ import annotations
 
@@ -36,27 +38,33 @@ def test_two_branch_table_unions_both_arms(catalog: vp.VgiCatalog) -> None:
 
 @requires_branches_support
 def test_branch_filter_makes_overlapping_arms_disjoint(catalog: vp.VgiCatalog) -> None:
-    """multi_branch_filtered_numbers: two sequence(100) arms with
-    complementary branch_filters ('n < 50' / 'n >= 50') carving the range in
-    half — total 100 rows, no duplicates, proving branch_filter is actually
-    applied (not just a no-op union that would give 200 rows)."""
+    """multi_branch_filtered_numbers: two sequence(100) arms with complementary branch_filters.
+
+    ('n < 50' / 'n >= 50') carving the range in half — total 100 rows, no
+    duplicates, proving branch_filter is actually applied (not just a
+    no-op union that would give 200 rows).
+    """
     out = catalog.table("data", "multi_branch_filtered_numbers").scan().collect()
     assert out.height == 100
     assert sorted(out["n"].to_list()) == list(range(100))
 
 
 def test_single_branch_table_takes_the_unchanged_scan_path(catalog: vp.VgiCatalog) -> None:
-    """An ordinary table (one branch under the hood, via the legacy-RPC
-    fallback) must scan exactly as before — no multi-branch overhead visible
-    in the result."""
+    """An ordinary table (one branch under the hood, via the legacy-RPC fallback).
+
+    Must scan exactly as before — no multi-branch overhead visible in the
+    result.
+    """
     out = catalog.table("data", "numbers").scan().collect()
     assert out.height > 0
 
 
 def test_catalog_table_branch_raises_clearly(catalog: vp.VgiCatalog) -> None:
-    """`source_table`-discriminated branches (companion-catalog federation)
-    are explicitly out of scope — must raise `VgiPolarsError`, never silently
-    mis-scan or crash with an unrelated error."""
+    """`source_table`-discriminated branches (companion-catalog federation) are explicitly out of scope.
+
+    Must raise `VgiPolarsError`, never silently mis-scan or crash with an
+    unrelated error.
+    """
     from vgi.catalog.catalog_interface import ScanBranch
 
     from vgi_polars._multi_branch import scan_multi_branch

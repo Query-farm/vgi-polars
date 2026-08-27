@@ -1,9 +1,11 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Aggregate functions via the eager `pl.DataFrame` bridge (`_aggregate.py`)
-— `AggregateClientMixin.aggregate_function` already drives the whole bind/
+"""Aggregate functions via the eager `pl.DataFrame` bridge (`_aggregate.py`).
+
+`AggregateClientMixin.aggregate_function` already drives the whole bind/
 update/finalize/destructor loop; this is a thin conversion layer, not a lazy
-Polars expression (Polars has no groupby-aggregation plugin hook)."""
+Polars expression (Polars has no groupby-aggregation plugin hook).
+"""
 
 from __future__ import annotations
 
@@ -32,8 +34,11 @@ def test_ungrouped_sum_is_one_row(catalog: vp.VgiCatalog) -> None:
 
 
 def test_const_arg_aggregate(catalog: vp.VgiCatalog) -> None:
-    """`vgi_percentile(value, 0.5)` — `percentile` is a `ConstParam`, same
-    wire convention (`vgi_const` metadata) as a scalar function's const args."""
+    """`vgi_percentile(value, 0.5)`.
+
+    `percentile` is a `ConstParam`, same wire convention (`vgi_const`
+    metadata) as a scalar function's const args.
+    """
     percentile = catalog.aggregate_function("main", "vgi_percentile")
     df = pl.DataFrame({"cat": ["a", "a", "a"], "value": [1.0, 2.0, 3.0]})
     out = percentile(df, 0.5, group_by=["cat"])

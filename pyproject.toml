@@ -48,7 +48,15 @@ Issues = "https://github.com/Query-farm/vgi-polars/issues"
 # Includes the `http` extra so `uv sync` (no --extra needed) can run the
 # HTTP-transport tests locally — vgi.client.Client's HTTP path imports
 # vgi_rpc.http, which needs falcon (only pulled in via vgi-python[http]).
+#
+# pydoclint is intentionally NOT here, matching vgi-python's own pyproject.toml
+# comment: it pulls docstring-parser-fork, which can clobber the canonical
+# docstring-parser in the shared `docstring_parser` namespace. Run it isolated
+# via `uvx pydoclint --config pyproject.toml src/` instead (see "Lint / Type
+# Check" in CLAUDE.md).
 dev = [
+    "mypy",
+    "pyarrow-stubs",
     "pytest>=8.0",
     "pytest-cov>=7.1.0",
     "ruff",
@@ -74,15 +82,53 @@ packages = ["src/vgi_polars"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# Pinned explicitly rather than left to ruff's version-dependent defaults —
-# discovered live that the globally-installed ruff (0.15.18) and the
-# project-resolved ruff (0.16.4) disagreed sharply on what "default" means
-# (0.16 silently enables a much broader rule set with no config present).
-# This is ruff's own documented default selection (pyflakes + a pycodestyle
-# subset), made explicit so a future ruff version can't silently change what
-# this repo is checked against in either direction. `select = ["ALL"]` was
-# tried and reverted: it fires S101 (no `assert`) on every pytest test and
-# PLR2004 (no magic values) on every literal in a comparison — appropriate
-# for production code, not a test suite using plain `assert`.
+# Adopted from vgi-python's own pyproject.toml (same rule set, same
+# pydocstyle convention, same formatter settings) — this repo tracks
+# vgi-python's client-side surface closely enough that its own lint/type/
+# docstring bar is the right one to hold vgi-polars to as well.
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+
+# Test functions/fixtures aren't documented the way public src/ API is —
+# vgi-python suppresses the same rules per-file via inline `# ruff: noqa:`
+# comments; a blanket per-file-ignore here is equivalent and less repetitive
+# across ~20 test files. D100/D103 = missing module/function docstring,
+# D101/D102 = missing class/method docstring.
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D100", "D101", "D102", "D103"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pydoclint]
+# Docstring consistency gate (complements ruff's `D` rules, which only check
+# docstring *shape*, not whether documented args/attributes match the code).
+# NOT a project dependency (see the `dev` group comment above) — run isolated:
+#   uvx pydoclint --config pyproject.toml src/
+style = "google"
+# We keep types in signatures, not docstrings (Google style) — so don't ask
+# for them in docstrings, and don't try to match return/yield *types* against
+# prose.
+arg_type_hints_in_docstring = false
+check_return_types = false
+check_yield_types = false
+check_class_attributes = true
+# Raises (DOC5xx) are intentionally not gated, matching vgi-python: this
+# codebase's docstrings describe exceptions in prose, not a formal `Raises:`
+# section pydoclint can cross-check against actual `raise` statements.
+skip_checking_raises = true
+# Document constructor params in the class docstring, not __init__.
+allow_init_docstring = true
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true

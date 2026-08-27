@@ -1,12 +1,14 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Time travel (`VgiCatalog.table(..., at_unit=..., at_value=...)`) — against
-the real `data.versioned_data` fixture (`vgi/_test_fixtures/table/
+"""Time travel via `VgiCatalog.table(..., at_unit=..., at_value=...)`.
+
+Exercised against the real `data.versioned_data` fixture (`vgi/_test_fixtures/table/
 versioned.py`), which needed a vgi-python fix first: `Client.table_get`/
 `Client.table_function` didn't accept `at_unit`/`at_value` at all, even
 though the underlying wire RPCs always carried them and
 `Client.table_scan_function_get` already exposed them. See CLAUDE.md's
-"Time travel" section."""
+"Time travel" section.
+"""
 
 from __future__ import annotations
 
@@ -45,9 +47,10 @@ def test_scan_at_a_past_version_returns_that_versions_rows(catalog: vp.VgiCatalo
 
 @requires_time_travel
 def test_scan_live_is_unaffected_by_a_separately_requested_version(catalog: vp.VgiCatalog) -> None:
-    """Two different `VgiTable` instances (one versioned, one live) never
-    share memoized schema/scan-function state — each resolves and scans
-    independently."""
+    """Two different `VgiTable` instances (one versioned, one live) never share memoized state.
+
+    Each `VgiTable` resolves and scans independently, with its own schema/scan-function state.
+    """
     v1 = catalog.table("data", "versioned_data", at_unit="VERSION", at_value="1")
     live = catalog.table("data", "versioned_data")
 

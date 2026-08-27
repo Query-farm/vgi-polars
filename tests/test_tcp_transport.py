@@ -1,15 +1,17 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""The core catalog/scan/scalar paths over TCP transport (raw Arrow-IPC
-framing, no auth/encryption — loopback only), mirroring the subprocess- and
-HTTP-transport tests. Smoke coverage, not a duplicate of the full suite — see
-`test_http_transport.py`'s module docstring for the same rationale.
+"""The core catalog/scan/scalar paths over TCP transport.
+
+TCP transport here means raw Arrow-IPC framing, no auth/encryption — loopback only, mirroring
+the subprocess- and HTTP-transport tests. Smoke coverage, not a duplicate of the full suite —
+see `test_http_transport.py`'s module docstring for the same rationale.
 
 `tcp_worker_base_url` (session-scoped, `conftest.py`) is backed by a
 launcher-style reused-or-spawned warm worker (`_launch_tcp_worker`) rather
 than a fresh subprocess per test — the TCP analogue of `vgi_rpc.launcher`'s
 unix-socket design, since `vgi.client.Client` has no unix-socket transport to
-pair the real launcher module with (see CLAUDE.md's transport-gap note)."""
+pair the real launcher module with (see CLAUDE.md's transport-gap note).
+"""
 
 from __future__ import annotations
 
@@ -35,7 +37,9 @@ def test_scalar_function_over_tcp(tcp_catalog: vp.VgiCatalog) -> None:
 
 
 def test_required_filters_over_tcp(tcp_catalog: vp.VgiCatalog) -> None:
-    """The required-filters cost-safety check is transport-agnostic (purely
-    client-side, before any RPC) — a smoke check it also works over TCP."""
+    """The required-filters cost-safety check is transport-agnostic (purely client-side, before any RPC).
+
+    A smoke check it also works over TCP.
+    """
     out = tcp_catalog.table("data", "rff_simple").scan().filter(pl.col("a") > 1).collect()
     assert sorted(out["a"].to_list()) == [2, 3]

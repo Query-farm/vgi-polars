@@ -1,7 +1,8 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Filter pushdown translation, and the Design Principle 1 regression test:
-even when the (here, deliberately faked) worker completely ignores the
+"""Filter pushdown translation, and the Design Principle 1 regression test.
+
+Even when the (here, deliberately faked) worker completely ignores the
 pushed-down predicate, `VgiTable.scan()` must still return the exactly
 correct rows — because `_source.py` always re-applies the original predicate
 locally, unconditionally. See CLAUDE.md's "Design Principle 1" section.
@@ -82,33 +83,40 @@ def test_translate_predicate_decimal() -> None:
 
 
 def test_translate_predicate_timezone_aware_datetime_declines() -> None:
-    """A tz name alone isn't enough to reconstruct a correct offset without a
+    """Declines rather than risk a silently-wrong timezone comparison.
+
+    A tz name alone isn't enough to reconstruct a correct offset without a
     tzdata dependency — declines rather than risk a silently-wrong comparison
-    (falls back to local filtering, per Design Principle 1)."""
-    dt = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    (falls back to local filtering, per Design Principle 1).
+    """
+    dt = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
     assert translate_predicate(pl.col("dt") > dt, ["dt"]) is None
 
 
 def test_filter_pushdown_end_to_end(catalog: vp.VgiCatalog) -> None:
-    """Against the real `filter_echo` fixture (declares filter_pushdown=True),
-    a pushdown-eligible predicate still produces exactly correct rows."""
+    """A pushdown-eligible predicate against a real filter-pushdown worker produces correct rows.
+
+    Against the real `filter_echo` fixture (declares filter_pushdown=True),
+    a pushdown-eligible predicate still produces exactly correct rows.
+    """
     t = catalog.table("data", "filter_echo_table")
     out = t.scan().filter((pl.col("n") > 3) & (pl.col("n") < 8)).collect()
     assert sorted(out["n"].to_list()) == [4, 5, 6, 7]
 
 
 def test_local_refilter_survives_a_worker_that_ignores_pushdown(catalog: vp.VgiCatalog, monkeypatch) -> None:
-    """Design Principle 1 regression test. Monkeypatches the underlying
-    `Client.table_function` to return ALL rows unfiltered/unprojected no
-    matter what `projection_ids`/`pushdown_filters` it's called with —
-    simulating a worker that declared pushdown support but doesn't honor it.
-    `VgiTable.scan()` must still return exactly the right rows."""
+    """Design Principle 1 regression test.
+
+    Monkeypatches the underlying `Client.table_function` to return ALL rows
+    unfiltered/unprojected no matter what `projection_ids`/`pushdown_filters`
+    it's called with — simulating a worker that declared pushdown support but
+    doesn't honor it. `VgiTable.scan()` must still return exactly the right
+    rows.
+    """
     t = catalog.table("data", "numbers")
     # Force pushdown to actually be attempted (numbers' own scan function may
     # not declare support) by making _function_info_get() report full support.
-    fake_info = type(
-        "FakeInfo", (), {"projection_pushdown": True, "filter_pushdown": True, "supports_splits": False}
-    )()
+    fake_info = type("FakeInfo", (), {"projection_pushdown": True, "filter_pushdown": True, "supports_splits": False})()
     monkeypatch.setattr(t, "_function_info_get", lambda: fake_info)
 
     # Table scans go through the per-thread exchange client

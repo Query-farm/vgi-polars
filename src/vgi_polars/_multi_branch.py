@@ -37,7 +37,7 @@ import polars as pl
 from vgi_polars.errors import VgiPolarsError
 
 if TYPE_CHECKING:
-    from vgi.catalog.catalog_interface import ScanBranch
+    from vgi.catalog.catalog_interface import FunctionInfo, ScanBranch, ScanFunctionResult
 
     from vgi_polars.catalog import VgiCatalog
     from vgi_polars.table import VgiTable
@@ -108,22 +108,28 @@ def parse_branch_filter(sql: str) -> pl.Expr:
 
 
 class _BranchTable:
-    """Duck-typed adapter so one `ScanBranch` can drive `_source.py`'s
-    `make_io_source` exactly like an ordinary `VgiTable` — same pattern
-    `test_errors.py`'s `_FakeTableForScanFunction` and `test_splits.py`'s
-    `_FakeSplitTable` use in this repo's own test suite. `required_filters`
-    returns empty: enforced once at the outer multi-branch table level
-    (`VgiTable.required_filters()`), not redundantly per branch."""
+    """Duck-typed adapter so one `ScanBranch` can drive `_source.py`'s `make_io_source`.
+
+    It behaves exactly like an ordinary `VgiTable` — the same pattern `test_errors.py`'s
+    `_FakeTableForScanFunction` and `test_splits.py`'s `_FakeSplitTable` use in this repo's
+    own test suite. `required_filters` returns empty: enforced once at the outer
+    multi-branch table level (`VgiTable.required_filters()`), not redundantly per branch.
+    """
 
     def __init__(self, *, catalog: VgiCatalog, schema_name: str, name: str, branch: ScanBranch) -> None:
         self._catalog = catalog
         self.schema_name = schema_name
         self.name = name
-        self.at_unit = None
-        self.at_value = None
+        # No per-branch time travel (yet) — always the live view; a branch
+        # inherits AT-clause behavior from the outer VgiTable in a future
+        # extension, not per-branch state today. Typed `str | None` (not
+        # bare `None`) to match `_ScanSource`'s attribute, which every other
+        # implementer (`VgiTable`) genuinely varies at runtime.
+        self.at_unit: str | None = None
+        self.at_value: str | None = None
         self._branch = branch
 
-    def _scan_function_get(self):  # noqa: ANN202 - matches VgiTable's own untyped internal method
+    def _scan_function_get(self) -> ScanFunctionResult:
         from vgi.catalog.catalog_interface import ScanFunctionResult
 
         return ScanFunctionResult(
@@ -132,7 +138,7 @@ class _BranchTable:
             named_arguments=dict(self._branch.named_arguments),
         )
 
-    def _function_info_get(self):  # noqa: ANN202
+    def _function_info_get(self) -> FunctionInfo | None:
         from vgi.catalog.catalog_interface import SchemaObjectType
 
         from vgi_polars.errors import VGI_CLIENT_ERRORS
@@ -155,10 +161,12 @@ class _BranchTable:
 
 
 def scan_multi_branch(table: VgiTable, branches: list[ScanBranch]) -> pl.LazyFrame:
-    """`pl.concat` of one scan per branch, each with its `branch_filter`
-    (if any) applied. Zero branches is legal (a fully-pruned multi-branch
-    scan prunes to nothing, matching the C++ extension's own handling) and
-    scans as an empty result with the table's declared schema."""
+    """Build a `pl.concat` of one scan per branch, each with its `branch_filter` (if any) applied.
+
+    Zero branches is legal (a fully-pruned multi-branch scan prunes to nothing, matching the
+    C++ extension's own handling) and scans as an empty result with the table's declared
+    schema.
+    """
     from polars.io.plugins import register_io_source
 
     from vgi_polars._source import make_io_source
@@ -180,7 +188,9 @@ def scan_multi_branch(table: VgiTable, branches: list[ScanBranch]) -> pl.LazyFra
                 f"{branch.format_name!r}) is not yet supported by vgi-polars. See CLAUDE.md's "
                 "Scope section."
             )
-        branch_table = _BranchTable(catalog=table._catalog, schema_name=table.schema_name, name=table.name, branch=branch)
+        branch_table = _BranchTable(
+            catalog=table._catalog, schema_name=table.schema_name, name=table.name, branch=branch
+        )
         lf = register_io_source(make_io_source(branch_table, table.arrow_schema), schema=table.schema)
         if branch.branch_filter:
             lf = lf.filter(parse_branch_filter(branch.branch_filter))

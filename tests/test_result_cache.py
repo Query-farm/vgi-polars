@@ -1,14 +1,16 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""The minimal in-memory result cache (`_result_cache.py`) — against the real
-`cacheable_numbers`/`cache_no_store` fixtures (`vgi/_test_fixtures/table/
-cache.py`), which needed a vgi-python fix first: `Client._table_function_
-parallel` discarded `AnnotatedBatch.custom_metadata` unconditionally, so a
-worker's `vgi.cache.*` cacheability advertisement never reached
-`table_function()`'s public generator at all. See CLAUDE.md's "Table-function
-result cache" section for the full scope (in-memory/TTL/producer-mode only —
-deliberately not the C++ extension's much larger disk-tier/revalidation/
-per-partition feature)."""
+"""The minimal in-memory result cache (`_result_cache.py`).
+
+Tested against the real `cacheable_numbers`/`cache_no_store` fixtures
+(`vgi/_test_fixtures/table/cache.py`), which needed a vgi-python fix first:
+`Client._table_function_parallel` discarded `AnnotatedBatch.custom_metadata`
+unconditionally, so a worker's `vgi.cache.*` cacheability advertisement never
+reached `table_function()`'s public generator at all. See CLAUDE.md's
+"Table-function result cache" section for the full scope
+(in-memory/TTL/producer-mode only — deliberately not the C++ extension's much
+larger disk-tier/revalidation/per-partition feature).
+"""
 
 from __future__ import annotations
 
@@ -36,19 +38,24 @@ requires_result_cache = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _flush_cache_before_and_after():
-    """The cache is a process-global singleton (see module docstring's
+    """Isolate each test's process-global cache state from its neighbors.
+
+    The cache is a process-global singleton (see module docstring's
     "identity scoping" note) — isolate each test from ones that ran before
-    or will run after it in the same pytest process."""
+    or will run after it in the same pytest process.
+    """
     _result_cache.flush()
     yield
     _result_cache.flush()
 
 
 class _CachedTable:
-    """Duck-typed stand-in for `VgiTable`, resolving `cacheable_numbers`/
-    `cache_no_store` directly as bare functions (schema `data`) — mirrors
-    `test_errors.py`'s `_FakeTableForScanFunction` pattern; neither fixture
-    is wrapped in a catalog `Table` entry."""
+    """Duck-typed stand-in for `VgiTable`.
+
+    Resolves `cacheable_numbers`/`cache_no_store` directly as bare functions
+    (schema `data`) — mirrors `test_errors.py`'s `_FakeTableForScanFunction`
+    pattern; neither fixture is wrapped in a catalog `Table` entry.
+    """
 
     def __init__(self, catalog: vp.VgiCatalog, function_name: str, n: int) -> None:
         self._catalog = catalog
@@ -91,7 +98,9 @@ def _spy_table_function(catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch)
 
 
 @requires_result_cache
-def test_cacheable_result_is_served_from_cache_on_repeat(catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cacheable_result_is_served_from_cache_on_repeat(
+    catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from vgi_polars._source import make_io_source
 
     calls = _spy_table_function(catalog, monkeypatch)
@@ -108,8 +117,11 @@ def test_cacheable_result_is_served_from_cache_on_repeat(catalog: vp.VgiCatalog,
 
 @requires_result_cache
 def test_local_refilter_still_applies_to_a_cache_hit(catalog: vp.VgiCatalog) -> None:
-    """Design Principle 1 holds for cached results too — a different
-    predicate on the second (cache-hit) call still gets the right rows."""
+    """Design Principle 1 holds for cached results too.
+
+    A different predicate on the second (cache-hit) call still gets the
+    right rows.
+    """
     import polars as pl
 
     from vgi_polars._source import make_io_source
@@ -139,8 +151,11 @@ def test_no_store_is_never_cached(catalog: vp.VgiCatalog, monkeypatch: pytest.Mo
 
 @requires_result_cache
 def test_n_rows_truncated_scan_is_never_cached(catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A LIMIT-truncated scan never drains its generator to EOS, so it must
-    never commit a partial result to the cache under the full-scan key."""
+    """A LIMIT-truncated scan must never commit a partial result to the cache.
+
+    A LIMIT-truncated scan never drains its generator to EOS, so it must
+    never commit a partial result to the cache under the full-scan key.
+    """
     from vgi_polars._source import make_io_source
 
     calls = _spy_table_function(catalog, monkeypatch)

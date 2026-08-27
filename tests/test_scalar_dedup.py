@@ -1,14 +1,16 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Per-chunk scalar input dedup (`_scalar.py`'s `_dedup_positions`) — the
-client-side mirror of the DuckDB C++ extension's `vgi_exchange_input_dedup`
+"""Per-chunk scalar input dedup (`_scalar.py`'s `_dedup_positions`).
+
+The client-side mirror of the DuckDB C++ extension's `vgi_exchange_input_dedup`
 setting. See `_scalar.py`'s module docstring for the full design; these tests
 verify the three load-bearing properties: (1) it actually reduces the batch
 shipped to the worker for a low-cardinality `CONSISTENT`/
 `CONSISTENT_WITHIN_QUERY` call, (2) results still land on the correct
 original row regardless, and (3) a `FunctionStability.VOLATILE` function is
 never deduped — duplicate inputs must still each reach the worker, since
-identical inputs aren't guaranteed to produce identical outputs."""
+identical inputs aren't guaranteed to produce identical outputs.
+"""
 
 from __future__ import annotations
 
@@ -46,9 +48,12 @@ def test_dedup_positions_declines_on_empty_batch() -> None:
 
 
 def test_dedup_reduces_worker_batch_size_for_low_cardinality_input(catalog: vp.VgiCatalog, monkeypatch) -> None:
-    """`query_seed` is `FunctionStability.CONSISTENT_WITHIN_QUERY` — safe to
-    dedup within one call. Spy on the underlying exchange call to confirm the
-    worker actually receives the deduped (smaller) batch, not the raw one."""
+    """`query_seed` is safe to dedup within one call.
+
+    It's `FunctionStability.CONSISTENT_WITHIN_QUERY`. Spy on the underlying
+    exchange call to confirm the worker actually receives the deduped
+    (smaller) batch, not the raw one.
+    """
     query_seed = catalog.scalar_function("main", "query_seed")
 
     exchange_client = catalog._exchange_client()
@@ -91,8 +96,11 @@ def test_dedup_can_be_disabled_explicitly(catalog: vp.VgiCatalog, monkeypatch) -
 
 
 def test_volatile_function_never_deduped(catalog: vp.VgiCatalog, monkeypatch) -> None:
-    """`random_int` is `FunctionStability.VOLATILE` — even with `dedup=True`
-    (the default), every duplicate row must still reach the worker."""
+    """`random_int` is VOLATILE, so every duplicate row must still reach the worker.
+
+    It's `FunctionStability.VOLATILE` — even with `dedup=True` (the default),
+    every duplicate row must still reach the worker.
+    """
     random_int = catalog.scalar_function("main", "random_int")
 
     exchange_client = catalog._exchange_client()

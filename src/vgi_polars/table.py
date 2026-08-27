@@ -21,6 +21,7 @@ from vgi.catalog.catalog_interface import (
     TableInfo,
 )
 
+from vgi_polars._polars_compat import arrow_to_df
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -45,8 +46,10 @@ except Exception:  # noqa: BLE001 - never let a capability probe break import
 
 
 class VgiTable:
-    """A lazy handle to one table in an attached VGI catalog. Construct via
-    `VgiCatalog.table(schema_name, name)`, not directly."""
+    """A lazy handle to one table in an attached VGI catalog.
+
+    Construct via `VgiCatalog.table(schema_name, name)`, not directly.
+    """
 
     def __init__(
         self,
@@ -57,6 +60,7 @@ class VgiTable:
         at_unit: str | None = None,
         at_value: str | None = None,
     ) -> None:
+        """Wrap a resolved `(schema_name, name)` in `catalog`. Use `VgiCatalog.table(...)`, not this directly."""
         self._catalog = catalog
         self.schema_name = schema_name
         self.name = name
@@ -84,7 +88,14 @@ class VgiTable:
                     "time travel requires a newer vgi-python (Client.table_get predates at_unit/"
                     "at_value on the installed version) — see CLAUDE.md's Time travel section"
                 )
-            at_kwargs = {"at_unit": self.at_unit, "at_value": self.at_value} if _SUPPORTS_TABLE_GET_AT_CLAUSE else {}
+            # `dict[str, Any]`, not the narrower `dict[str, str | None]` a bare
+            # literal would infer — splatted against `table_get`'s many
+            # keyword-only params, the narrow inference makes mypy conflate
+            # this with an unrelated param (`transaction_opaque_data`) it
+            # could also (but never actually does) receive via **at_kwargs.
+            at_kwargs: dict[str, Any] = (
+                {"at_unit": self.at_unit, "at_value": self.at_value} if _SUPPORTS_TABLE_GET_AT_CLAUSE else {}
+            )
             try:
                 info = self._catalog.client.table_get(
                     attach_opaque_data=self._catalog.attach_opaque_data,
@@ -125,7 +136,9 @@ class VgiTable:
         return next((i for i in infos if i.name == function_name), None)
 
     def _resolve_scan_function(self) -> None:
-        """Resolve both the `FunctionInfo` (pushdown capability flags) and the
+        """Resolve the `FunctionInfo` and the schema the scan function actually lives in.
+
+        Resolves both the `FunctionInfo` (pushdown capability flags) and the
         **schema the scan function actually lives in** — which is not
         necessarily this table's own schema. A worker registers function
         names per schema and may reuse a name across schemas (observed live
@@ -165,17 +178,21 @@ class VgiTable:
         self._scan_function_schema = self.schema_name
 
     def _function_info_get(self) -> FunctionInfo | None:
-        """The `FunctionInfo` for the resolved scan function, if discoverable —
-        used to check `projection_pushdown`/`filter_pushdown` opt-in flags.
+        """The `FunctionInfo` for the resolved scan function, if discoverable.
+
+        Used to check `projection_pushdown`/`filter_pushdown` opt-in flags.
         `None` means "couldn't find it, assume no pushdown support" — a safe
-        default given `_source.py` always re-verifies locally regardless."""
+        default given `_source.py` always re-verifies locally regardless.
+        """
         self._resolve_scan_function()
         return self._function_info
 
     def scan_function_schema(self) -> str:
-        """The schema to call the resolved scan function in — see
-        `_resolve_scan_function`'s docstring for why this can differ from
-        `self.schema_name`."""
+        """The schema to call the resolved scan function in.
+
+        See `_resolve_scan_function`'s docstring for why this can differ from
+        `self.schema_name`.
+        """
         self._resolve_scan_function()
         assert self._scan_function_schema is not None
         return self._scan_function_schema
@@ -188,20 +205,23 @@ class VgiTable:
     @property
     def schema(self) -> pl.Schema:
         """The table's schema as a `polars.Schema` (no scan)."""
-        return pl.from_arrow(self.arrow_schema.empty_table()).schema
+        return arrow_to_df(self.arrow_schema.empty_table()).schema
 
     def _scan_branches_get(self) -> list[Any]:
-        """The table's scan branches (memoized) — one `ScanBranch` for an
-        ordinary single-source table, more for a multi-branch one. Uses
-        `Client.table_scan_branches_get`, which transparently falls back to
-        wrapping `table_scan_function_get`'s single result as one branch for
-        a worker that predates the branches RPC — so this is always safe to
-        call, not just for tables known in advance to be multi-branch. See
-        `_multi_branch.py`'s module docstring for why calling this
-        unconditionally (rather than only when a table is already known to
-        be multi-branch) matters: `table_scan_function_get` alone silently
-        returns only the *first* branch of a multi-branch table, which was a
-        real, silent correctness gap before this method existed."""
+        """The table's scan branches (memoized).
+
+        One `ScanBranch` for an ordinary single-source table, more for a
+        multi-branch one. Uses `Client.table_scan_branches_get`, which
+        transparently falls back to wrapping `table_scan_function_get`'s
+        single result as one branch for a worker that predates the branches
+        RPC — so this is always safe to call, not just for tables known in
+        advance to be multi-branch. See `_multi_branch.py`'s module docstring
+        for why calling this unconditionally (rather than only when a table
+        is already known to be multi-branch) matters: `table_scan_function_get`
+        alone silently returns only the *first* branch of a multi-branch
+        table, which was a real, silent correctness gap before this method
+        existed.
+        """
         if self._scan_branches is None:
             try:
                 result = self._catalog.client.table_scan_branches_get(
@@ -217,18 +237,21 @@ class VgiTable:
         return self._scan_branches
 
     def scan(self) -> pl.LazyFrame:
-        """A lazy, pushdown-aware scan of this table. Transparently handles a
-        multi-branch table (`pl.concat` of one scan per branch, each branch's
-        `branch_filter` applied — see `_multi_branch.py`) — the common,
-        single-branch case takes the unchanged single-scan path with no
-        multi-branch overhead beyond the one extra (cheap, memoized, unary)
-        `table_scan_branches_get` catalog call. `hasattr` guards against an
-        installed vgi-python that predates `Client.table_scan_branches_get`
-        (see CLAUDE.md's "Multi-branch tables" section) — an older pinned
-        release falls back to the single-scan path via the legacy
-        `table_scan_function_get` (branch 0 only for a genuinely multi-branch
-        table — the same silent limitation this feature fixes, but no worse
-        than before this method existed, and never an `AttributeError`)."""
+        """A lazy, pushdown-aware scan of this table.
+
+        Transparently handles a multi-branch table (`pl.concat` of one scan
+        per branch, each branch's `branch_filter` applied — see
+        `_multi_branch.py`) — the common, single-branch case takes the
+        unchanged single-scan path with no multi-branch overhead beyond the
+        one extra (cheap, memoized, unary) `table_scan_branches_get` catalog
+        call. `hasattr` guards against an installed vgi-python that predates
+        `Client.table_scan_branches_get` (see CLAUDE.md's "Multi-branch
+        tables" section) — an older pinned release falls back to the
+        single-scan path via the legacy `table_scan_function_get` (branch 0
+        only for a genuinely multi-branch table — the same silent limitation
+        this feature fixes, but no worse than before this method existed,
+        and never an `AttributeError`).
+        """
         if hasattr(self._catalog.client, "table_scan_branches_get"):
             branches = self._scan_branches_get()
             if len(branches) != 1:
@@ -248,11 +271,13 @@ class VgiTable:
         return self.scan().collect()
 
     def statistics(self) -> list[ColumnStatistics]:
-        """Per-column statistics (min/max/null presence/distinct count/...),
-        if the worker advertises them — a plain catalog-metadata RPC, no scan.
-        Returns vgi-python's own `ColumnStatistics` dataclass directly rather
-        than reinventing an equivalent; `pa.Scalar`-typed `.min`/`.max`, call
-        `.as_py()` for a plain Python value."""
+        """Per-column statistics (min/max/null presence/distinct count/...), if the worker advertises them.
+
+        A plain catalog-metadata RPC, no scan. Returns vgi-python's own
+        `ColumnStatistics` dataclass directly rather than reinventing an
+        equivalent; `pa.Scalar`-typed `.min`/`.max`, call `.as_py()` for a
+        plain Python value.
+        """
         try:
             return self._catalog.client.table_column_statistics(
                 attach_opaque_data=self._catalog.attach_opaque_data,
@@ -263,15 +288,17 @@ class VgiTable:
             raise VgiPolarsError(str(e)) from e
 
     def required_filters(self) -> list[list[str]]:
-        """AND-of-OR-groups of column names a scan predicate must reference
-        at least one of, per group — purely declarative on the wire (`TableInfo.
-        required_filters`); vgi-python does no enforcement itself (by design,
-        the DuckDB C++ extension's optimizer does it there). `_source.py`
-        enforces it here, before scanning, as a cost-safety guard: without it,
+        """AND-of-OR-groups of column names a scan predicate must reference at least one of, per group.
+
+        Purely declarative on the wire (`TableInfo.required_filters`);
+        vgi-python does no enforcement itself (by design, the DuckDB C++
+        extension's optimizer does it there). `_source.py` enforces it here,
+        before scanning, as a cost-safety guard: without it,
         `.scan().collect()` with no matching filter on a `required_filters`
         table would trigger a full, possibly enormous, unfiltered remote scan
         — Design Principle 1 keeps that *correct*, not *safe from accidental
-        cost*."""
+        cost*.
+        """
         return list(self._table_get().required_filters)
 
 

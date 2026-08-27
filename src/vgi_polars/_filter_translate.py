@@ -1,7 +1,6 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Best-effort translation of a Polars predicate `Expr` into VGI's filter-pushdown
-wire format.
+"""Best-effort translation of a Polars predicate `Expr` into VGI's filter-pushdown wire format.
 
 This is purely an optimization (see `errors.py`'s module docstring and
 `_source.py`'s "Design Principle 1" comment): `vgi_polars` always re-applies the
@@ -62,8 +61,10 @@ _FLIPPED_OPS = {
 
 
 def _flatten_and(node: dict[str, Any]) -> list[dict[str, Any]]:
-    """Flatten a right-leaning/left-leaning chain of top-level `And` BinaryExprs
-    into a flat list of conjunct AST nodes."""
+    """Flatten a chain of top-level `And` BinaryExprs into a flat list of conjunct AST nodes.
+
+    Handles both right-leaning and left-leaning chains.
+    """
     binary = node.get("BinaryExpr")
     if isinstance(binary, dict) and binary.get("op") == "And":
         return _flatten_and(binary["left"]) + _flatten_and(binary["right"])
@@ -78,9 +79,10 @@ def _timedelta_from_units(amount: int, unit: str) -> datetime.timedelta:
 
 
 def _literal_value(node: dict[str, Any]) -> tuple[Any, bool]:
-    """Extract a Python value from a `Literal` AST node, converted to the
-    Python type pyarrow would infer the *correct* Arrow type from (so
-    `pa.array([value])` downstream never silently mistypes a temporal/binary/
+    """Extract a Python value from a `Literal` AST node.
+
+    The value is converted to the Python type pyarrow would infer the *correct* Arrow type
+    from (so `pa.array([value])` downstream never silently mistypes a temporal/binary/
     decimal value as a bare int).
 
     Two distinct shapes carry a plain numeric/string/bool scalar, observed
@@ -110,13 +112,18 @@ def _literal_value(node: dict[str, Any]) -> tuple[Any, bool]:
     for key, value in typed.items():
         # {"Int": 5} / {"Int64": 5}, {"Float": 1.5} / {"Float64": 1.5},
         # {"Str": "x"} / {"String": "x"}, {"Bool": true} / {"Boolean": true}, ...
-        if isinstance(value, (int, float, str, bool)) or value is None:
-            # A bare int/float under a temporal/decimal key would be
-            # mistyped below by the isinstance check alone — these keys are
-            # handled explicitly first via the branches below, so falling
-            # through to here only happens for genuinely plain scalars.
-            if key not in ("Date", "Datetime", "Duration", "Binary", "Decimal"):
-                return value, True
+        # A bare int/float under a temporal/decimal key would be mistyped
+        # below by the isinstance check alone — these keys are handled
+        # explicitly first via the branches below, so falling through to
+        # here only happens for genuinely plain scalars.
+        if (isinstance(value, (int, float, str, bool)) or value is None) and key not in (
+            "Date",
+            "Datetime",
+            "Duration",
+            "Binary",
+            "Decimal",
+        ):
+            return value, True
         try:
             if key == "Date" and isinstance(value, int):
                 return _EPOCH_DATE + datetime.timedelta(days=value), True

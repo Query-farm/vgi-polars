@@ -1,9 +1,11 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Scalar function calls via the `pl.Expr.map_batches` bridge — including the
-array-argument + constant-argument mix (`main.multiply(value, factor)`:
-`value` is a per-row array param, `factor` is a `ConstParam` bound at call
-time, not exchanged per row — see `_scalar.py`'s module docstring)."""
+"""Scalar function calls via the `pl.Expr.map_batches` bridge.
+
+Includes the array-argument + constant-argument mix (`main.multiply(value,
+factor)`: `value` is a per-row array param, `factor` is a `ConstParam` bound
+at call time, not exchanged per row — see `_scalar.py`'s module docstring).
+"""
 
 from __future__ import annotations
 
@@ -40,14 +42,16 @@ def test_unknown_scalar_function_raises(catalog: vp.VgiCatalog) -> None:
 
 
 def test_secrets_kwarg_reaches_the_exchange_call(catalog: vp.VgiCatalog, monkeypatch) -> None:
-    """`secrets=` on the returned callable threads straight through to
-    `Client.scalar_function`'s own `secrets` parameter. No existing
+    """`secrets=` on the returned callable threads through to `Client.scalar_function`.
+
+    It reaches `Client.scalar_function`'s own `secrets` parameter. No existing
     vgi-fixture-worker scalar function combines a `Secret()` param with a
     regular array param (the two that use `Secret()` at all,
     `return_secret_value`/`secret_field`, take zero array args — a call shape
     vgi-polars' bridge doesn't support at all, independent of secrets), so
     this verifies the wiring directly rather than forcing an awkward fixture
-    match; see `_scalar.py`'s module docstring for the confirmed API gap."""
+    match; see `_scalar.py`'s module docstring for the confirmed API gap.
+    """
     multiply = catalog.scalar_function("main", "multiply")
 
     exchange_client = catalog._exchange_client()

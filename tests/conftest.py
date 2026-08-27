@@ -58,26 +58,33 @@ def worker_location() -> str:
 
 @pytest.fixture(scope="session")
 def bad_protocol_worker_location() -> str:
-    """A worker that enforces an incompatible `protocol_version` — for
-    testing that the mismatch surfaces as a clean `VgiPolarsError`, not a
+    """A worker that enforces an incompatible `protocol_version`.
+
+    For testing that the mismatch surfaces as a clean `VgiPolarsError`, not a
     hang or a raw traceback. Mirrors vgi-python's own
-    `tests/conformance/test_protocol_version.py`."""
+    `tests/conformance/test_protocol_version.py`.
+    """
     return str(_vgi_python_venv() / "vgi-fixture-bad-protocol-worker")
 
 
 @pytest.fixture(scope="session")
 def versioned_worker_location() -> str:
-    """A worker (catalog `versioned`) that validates `data_version_spec`/
-    `implementation_version` at ATTACH time and returns `resolved_data_version`/
-    `resolved_implementation_version` — see `vgi/_test_fixtures/versioned.py`."""
+    """A worker (catalog `versioned`) that validates version info at ATTACH time.
+
+    Validates `data_version_spec`/`implementation_version` at ATTACH time and
+    returns `resolved_data_version`/`resolved_implementation_version` — see
+    `vgi/_test_fixtures/versioned.py`.
+    """
     return str(_vgi_python_venv() / "vgi-fixture-versioned-worker")
 
 
 @pytest.fixture(scope="session")
 def bad_enum_worker_location() -> str:
-    """A worker that advertises an unrecognized wire-enum value (`double`'s
-    `null_handling`) — for testing that a metadata-parse failure surfaces as
-    a clean `VgiPolarsError`, not a hang or a raw traceback."""
+    """A worker that advertises an unrecognized wire-enum value (`double`'s `null_handling`).
+
+    For testing that a metadata-parse failure surfaces as a clean
+    `VgiPolarsError`, not a hang or a raw traceback.
+    """
     return str(_vgi_python_venv() / "vgi-fixture-bad-enum-worker")
 
 
@@ -102,8 +109,9 @@ def _tcp_alive(port: int) -> bool:
 
 
 def _launch_tcp_worker(argv: list[str], *, idle_timeout: float = 1800.0) -> int:
-    """Reuse-or-spawn a single warm `--tcp` worker process, keyed by `argv` —
-    the TCP analogue of `vgi_rpc.launcher`'s hash+flock+probe+spawn design
+    """Reuse-or-spawn a single warm `--tcp` worker process, keyed by `argv`.
+
+    The TCP analogue of `vgi_rpc.launcher`'s hash+flock+probe+spawn design
     (that module is unix-socket-only, and `vgi.client.Client` has no
     unix-socket transport to pair it with — only subprocess/http/tcp; see
     CLAUDE.md's transport-gap note). Spawned **detached**
@@ -152,10 +160,12 @@ def _launch_tcp_worker(argv: list[str], *, idle_timeout: float = 1800.0) -> int:
 
 
 def _spawn_http_worker(extra_env: dict[str, str] | None = None):
-    """Spawn `vgi-fixture-http` on a free port, wait for it to accept
-    connections, and yield its base URL — shared by the anonymous and
-    bearer-auth HTTP fixtures below. Skips (doesn't fail) the calling
-    fixture's tests if the binary is missing or never comes up."""
+    """Spawn `vgi-fixture-http` on a free port and yield its base URL.
+
+    Waits for it to accept connections, then yields its base URL — shared by
+    the anonymous and bearer-auth HTTP fixtures below. Skips (doesn't fail)
+    the calling fixture's tests if the binary is missing or never comes up.
+    """
     http_bin = _vgi_python_venv() / "vgi-fixture-http"
     if not http_bin.exists():
         pytest.skip(f"{http_bin} not found — build/sync vgi-python with the 'http' extra")
@@ -214,18 +224,22 @@ def _spawn_http_worker(extra_env: dict[str, str] | None = None):
 
 @pytest.fixture(scope="session")
 def tcp_worker_base_url(worker_location: str) -> str:
-    """A `tcp://127.0.0.1:<port>` location for the `example` catalog, backed
-    by a launcher-style reused-or-spawned warm worker (see
+    """A `tcp://127.0.0.1:<port>` location for the `example` catalog.
+
+    Backed by a launcher-style reused-or-spawned warm worker (see
     `_launch_tcp_worker`) — `vp.attach()` auto-detects the `tcp://` scheme
-    with no code changes needed (`catalog.py`'s `_detect_transport`)."""
+    with no code changes needed (`catalog.py`'s `_detect_transport`).
+    """
     port = _launch_tcp_worker([worker_location])
     return f"tcp://127.0.0.1:{port}"
 
 
 @pytest.fixture(scope="session")
 def http_worker_base_url():
-    """Session-scoped `vgi-fixture-http` (HTTP-transport counterpart of
-    `worker_location`), no bearer auth (anonymous mode)."""
+    """Session-scoped `vgi-fixture-http`, the HTTP-transport counterpart of `worker_location`.
+
+    No bearer auth (anonymous mode).
+    """
     yield from _spawn_http_worker()
 
 
@@ -236,11 +250,13 @@ def http_bearer_token() -> str:
 
 @pytest.fixture(scope="session")
 def http_bearer_worker_base_url(http_bearer_token: str):
-    """Session-scoped `vgi-fixture-http` with bearer auth enforced
-    (`VGI_BEARER_TOKENS`) — separate server instance from
-    `http_worker_base_url`, which must stay anonymous for the other HTTP
-    tests. Mirrors `vgi-sqlite/test/integration/conftest.py`'s
-    `http_bearer_token`/`VGI_BEARER_TOKENS` fixture pattern."""
+    """Session-scoped `vgi-fixture-http` with bearer auth enforced (`VGI_BEARER_TOKENS`).
+
+    A separate server instance from `http_worker_base_url`, which must stay
+    anonymous for the other HTTP tests. Mirrors
+    `vgi-sqlite/test/integration/conftest.py`'s
+    `http_bearer_token`/`VGI_BEARER_TOKENS` fixture pattern.
+    """
     yield from _spawn_http_worker({"VGI_BEARER_TOKENS": f"{http_bearer_token}=test-principal"})
 
 
@@ -267,9 +283,11 @@ def tcp_catalog(tcp_worker_base_url: str):
 
 @pytest.fixture
 def accumulate_catalog(worker_location: str):
-    """A fresh `VgiCatalog` attached to the `accumulate` catalog — a
-    *separate* catalog from `example` (`vgi-fixture-worker`'s MetaWorker
+    """A fresh `VgiCatalog` attached to the `accumulate` catalog.
+
+    A *separate* catalog from `example` (`vgi-fixture-worker`'s MetaWorker
     dispatches by attach name), hosting the `accumulate`/`accumulate_read`/
-    `accumulate_clear` table-in-out functions."""
+    `accumulate_clear` table-in-out functions.
+    """
     with vp.attach(worker_location, name="accumulate") as cat:
         yield cat

@@ -2,7 +2,8 @@
 
 """Plain-Python-value -> `Arguments` conversion (`_arguments.py`).
 
-Pure unit tests — no worker needed."""
+Pure unit tests — no worker needed.
+"""
 
 from __future__ import annotations
 

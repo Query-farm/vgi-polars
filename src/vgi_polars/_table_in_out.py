@@ -66,18 +66,23 @@ real vgi-python API gap, not a vgi-polars design choice.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
-from vgi.catalog.catalog_interface import FunctionType, SchemaObjectType
+from vgi.catalog.catalog_interface import FunctionInfo, FunctionType, SchemaObjectType
 
 from vgi_polars._arguments import to_scalar
+from vgi_polars._polars_compat import arrow_to_df
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
     from vgi_polars.catalog import VgiCatalog
+
+#: The callable `VgiCatalog.table_in_out_function` returns — see `make_table_in_out_function`.
+TableInOutFunction = Callable[..., pl.LazyFrame]
 
 _VGI_TYPE_KEY = b"vgi_type"
 _VGI_TABLE_VALUE = b"table"
@@ -85,26 +90,28 @@ _VGI_ARG_KEY = b"vgi_arg"
 _VGI_NAMED_VALUE = b"named"
 
 
-def _is_table_field(field: pa.Field) -> bool:
+def _is_table_field(field: pa.Field[Any]) -> bool:
     md = field.metadata or {}
     return md.get(_VGI_TYPE_KEY) == _VGI_TABLE_VALUE
 
 
-def _is_named_field(field: pa.Field) -> bool:
+def _is_named_field(field: pa.Field[Any]) -> bool:
     md = field.metadata or {}
     return md.get(_VGI_ARG_KEY) == _VGI_NAMED_VALUE
 
 
-def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str):
-    """Return a callable `fn(lf: pl.LazyFrame, *args, settings=None,
-    **named_args) -> pl.LazyFrame` for the table-in-out function
-    `schema_name.name`. `*args`/`**named_args` are the function's declared
-    bind-time arguments beyond the table input itself (see module docstring).
-    The `FunctionInfo` (argument/output schema + streaming-vs-buffering
-    dispatch) is resolved on first use and cached."""
-    cache: dict[str, object] = {}
+def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str) -> TableInOutFunction:
+    """Return a callable for the table-in-out function `schema_name.name`.
 
-    def _function_info():
+    The returned callable has signature `fn(lf: pl.LazyFrame, *args,
+    settings=None, **named_args) -> pl.LazyFrame`. `*args`/`**named_args` are
+    the function's declared bind-time arguments beyond the table input itself
+    (see module docstring). The `FunctionInfo` (argument/output schema +
+    streaming-vs-buffering dispatch) is resolved on first use and cached.
+    """
+    cache: dict[str, FunctionInfo] = {}
+
+    def _function_info() -> FunctionInfo:
         if "info" not in cache:
             try:
                 # Catalog-metadata call — the shared client, not the per-thread
@@ -131,9 +138,7 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
             cache["info"] = info
         return cache["info"]
 
-    def call(
-        lf: pl.LazyFrame, *args: Any, settings: dict[str, Any] | None = None, **named_args: Any
-    ) -> pl.LazyFrame:
+    def call(lf: pl.LazyFrame, *args: Any, settings: dict[str, Any] | None = None, **named_args: Any) -> pl.LazyFrame:
         info = _function_info()
         is_buffering = info.function_type == FunctionType.TABLE_BUFFERING
 
@@ -187,7 +192,7 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
             raise VgiPolarsError(str(e)) from e
         if "schema" not in bound:
             raise VgiPolarsError(f"{schema_name}.{name}: worker never returned a bind response")
-        pl_out_schema = pl.from_arrow(bound["schema"].empty_table()).schema
+        pl_out_schema = arrow_to_df(bound["schema"].empty_table()).schema
 
         def bridge_fn(df: pl.DataFrame) -> pl.DataFrame:
             table = df.to_arrow()
@@ -204,7 +209,9 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
                 # from multiple threads (confirmed live) — must use a
                 # per-thread client, never one shared across calls.
                 exchange_client = catalog._exchange_client()
-                method = exchange_client.table_buffering_function if is_buffering else exchange_client.table_in_out_function
+                method = (
+                    exchange_client.table_buffering_function if is_buffering else exchange_client.table_in_out_function
+                )
                 out_batches = list(
                     method(
                         function_name=name,
@@ -220,7 +227,7 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
             if not out_batches:
                 return pl.DataFrame(schema=pl_out_schema)
             out_table = pa.Table.from_batches(out_batches)
-            return pl.from_arrow(out_table)
+            return arrow_to_df(out_table)
 
         return lf.map_batches(bridge_fn, streamable=not is_buffering, schema=pl_out_schema)
 

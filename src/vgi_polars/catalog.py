@@ -32,10 +32,11 @@ this rather than assuming it).
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from typing import TYPE_CHECKING, Any, Literal, Self
 
-from vgi.catalog.catalog_interface import SchemaObjectType
+from vgi.catalog.catalog_interface import CatalogAttachResult, SchemaObjectType
 from vgi.client.client import Client
 
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
@@ -43,6 +44,11 @@ from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from vgi.catalog.catalog_interface import AttachOpaqueData
+
+    from vgi_polars._aggregate import AggregateFunction
+    from vgi_polars._scalar import ScalarFunctionCall
+    from vgi_polars._table_in_out import TableInOutFunction
     from vgi_polars.table import VgiTable
 
 __all__ = ["VgiCatalog", "attach"]
@@ -53,7 +59,10 @@ Transport = Literal["subprocess", "http", "tcp"]
 class VgiCatalog:
     """An attached VGI catalog. Construct via `attach()`, not directly."""
 
-    def __init__(self, *, client: Client, client_factory: Callable[[], Client], name: str, attach_result: Any) -> None:
+    def __init__(
+        self, *, client: Client, client_factory: Callable[[], Client], name: str, attach_result: CatalogAttachResult
+    ) -> None:
+        """Wrap an already-attached `client`/`attach_result` pair. Use `attach()`, not this directly."""
         self._client = client
         self._client_factory = client_factory
         self._name = name
@@ -69,92 +78,116 @@ class VgiCatalog:
 
     @property
     def name(self) -> str:
+        """The attach alias this catalog was attached under."""
         return self._name
 
     @property
-    def attach_opaque_data(self) -> bytes:
+    def attach_opaque_data(self) -> AttachOpaqueData:
+        """The opaque attachment id every catalog-scoped RPC threads through."""
         return self._attach_result.attach_opaque_data
 
     @property
     def default_schema(self) -> str:
-        """The catalog's default schema — the second place (after a table's own
-        schema) `VgiTable` looks for its resolved scan function, mirroring the
-        DuckDB C++ extension's own resolution order (`vgi_table_entry.cpp`:
-        *"the worker registers function names per schema and may reuse one
-        name across schemas, so the bind request has to name the schema we
-        found it in — not just the table's"*)."""
+        """The catalog's default schema.
+
+        The second place (after a table's own schema) `VgiTable` looks for its
+        resolved scan function, mirroring the DuckDB C++ extension's own
+        resolution order (`vgi_table_entry.cpp`: *"the worker registers
+        function names per schema and may reuse one name across schemas, so
+        the bind request has to name the schema we found it in — not just the
+        table's"*).
+        """
         return self._attach_result.default_schema
 
     @property
     def catalog_version(self) -> int:
-        """The catalog's version at attach time — bumps when schemas, tables,
-        or other catalog objects change. Compare against a later `vgi_clear_
-        cache()`-equivalent (there isn't a client-side metadata cache in
-        vgi-polars to invalidate, but a worker-side version bump is still a
-        useful staleness signal for a long-lived catalog handle)."""
+        """The catalog's version at attach time.
+
+        Bumps when schemas, tables, or other catalog objects change. Compare
+        against a later `vgi_clear_cache()`-equivalent (there isn't a
+        client-side metadata cache in vgi-polars to invalidate, but a
+        worker-side version bump is still a useful staleness signal for a
+        long-lived catalog handle).
+        """
         return self._attach_result.catalog_version
 
     @property
     def catalog_version_frozen(self) -> bool:
-        """Whether the worker asserts its schema/table/function metadata will
-        never change for the lifetime of this attach (an optimization hint —
-        vgi-polars doesn't currently cache catalog metadata client-side, so
-        this is informational only, not yet load-bearing here)."""
+        """Whether the worker asserts its catalog metadata is frozen for this attach.
+
+        Covers schema/table/function metadata never changing for the lifetime
+        of this attach (an optimization hint — vgi-polars doesn't currently
+        cache catalog metadata client-side, so this is informational only,
+        not yet load-bearing here).
+        """
         return self._attach_result.catalog_version_frozen
 
     @property
     def supports_transactions(self) -> bool:
+        """Whether the worker supports transactions for this catalog."""
         return self._attach_result.supports_transactions
 
     @property
     def supports_time_travel(self) -> bool:
         """Whether tables in this catalog support time travel (`AT` clauses).
+
         Note this is catalog-wide capability advertisement only — vgi-polars
         has no way to actually *perform* a time-travel scan even when this is
         `True`: `Client.table_get`/`Client.table_function` don't accept
         `at_unit`/`at_value` at all (only `Client.table_scan_function_get`
-        does), an upstream vgi-python gap. See CLAUDE.md's Scope section."""
+        does), an upstream vgi-python gap. See CLAUDE.md's Scope section.
+        """
         return self._attach_result.supports_time_travel
 
     @property
     def resolved_data_version(self) -> str | None:
-        """The concrete data version the worker resolved for this attach, if
-        it has an opinion (`None` otherwise, or if `data_version_spec` wasn't
-        passed to `attach()`). See `attach()`'s `data_version_spec` parameter."""
+        """The concrete data version the worker resolved for this attach.
+
+        `None` if the worker has no opinion, or if `data_version_spec` wasn't
+        passed to `attach()`. See `attach()`'s `data_version_spec` parameter.
+        """
         return self._attach_result.resolved_data_version
 
     @property
     def resolved_implementation_version(self) -> str | None:
-        """The concrete implementation version the worker resolved for this
-        attach, if it has an opinion. See `attach()`'s `implementation_version`
-        parameter."""
+        """The concrete implementation version the worker resolved for this attach.
+
+        `None` if the worker has no opinion. See `attach()`'s
+        `implementation_version` parameter.
+        """
         return self._attach_result.resolved_implementation_version
 
     @property
     def comment(self) -> str | None:
+        """An optional comment describing this catalog/database, if the worker set one."""
         return self._attach_result.comment
 
     @property
     def tags(self) -> dict[str, str]:
+        """Optional key-value tags associated with this catalog/database."""
         return dict(self._attach_result.tags or {})
 
     @property
     def client(self) -> Client:
-        """The underlying vgi-python `Client` used for **catalog-metadata**
-        RPCs only (`schemas`, `table_get`, `schema_contents`,
-        `table_scan_function_get`, `table_column_statistics`). Not part of the
+        """The underlying vgi-python `Client` used for **catalog-metadata** RPCs only.
+
+        Covers `schemas`, `table_get`, `schema_contents`,
+        `table_scan_function_get`, `table_column_statistics`. Not part of the
         stable public API. Exchange-mode calls (table/scalar/aggregate/
         table-in-out function invocation) must use `_exchange_client()`
-        instead — see the module docstring's "Thread safety" section."""
+        instead — see the module docstring's "Thread safety" section.
+        """
         return self._client
 
     def _exchange_client(self) -> Client:
-        """A `Client` safe for the calling thread's exclusive use, for
-        exchange-mode RPCs (`table_function`, `scalar_function`, and — once
-        added — `aggregate_function`/`table_in_out_function`/
-        `table_buffering_function`). Lazily creates and starts one per thread
-        via `_client_factory`, reusing it across that thread's subsequent
-        calls; never shared across threads. See the module docstring."""
+        """A `Client` safe for the calling thread's exclusive use, for exchange-mode RPCs.
+
+        Covers `table_function`, `scalar_function`, and — once added —
+        `aggregate_function`/`table_in_out_function`/`table_buffering_function`.
+        Lazily creates and starts one per thread via `_client_factory`,
+        reusing it across that thread's subsequent calls; never shared across
+        threads. See the module docstring.
+        """
         existing: Client | None = getattr(self._thread_local, "client", None)
         if existing is not None:
             return existing
@@ -188,8 +221,9 @@ class VgiCatalog:
     def table(
         self, schema_name: str, name: str, *, at_unit: str | None = None, at_value: str | None = None
     ) -> VgiTable:
-        """A lazy handle to a catalog table. No RPC happens until `.schema`,
-        `.scan()`, or `.read()` is used.
+        """A lazy handle to a catalog table.
+
+        No RPC happens until `.schema`, `.scan()`, or `.read()` is used.
 
         `at_unit`/`at_value` request a time-travel view (e.g. `at_unit=
         "VERSION", at_value="3"`) — a worker that doesn't support it on this
@@ -197,36 +231,44 @@ class VgiCatalog:
         bind option. A different AT clause is a different `VgiTable`
         instance (schema/scan-function resolution is cached per instance,
         never shared across AT clauses); call `table()` again to get another
-        version, don't mutate one you already have."""
+        version, don't mutate one you already have.
+        """
         from vgi_polars.table import VgiTable
 
         return VgiTable(catalog=self, schema_name=schema_name, name=name, at_unit=at_unit, at_value=at_value)
 
-    def scalar_function(self, schema_name: str, name: str):
+    def scalar_function(self, schema_name: str, name: str) -> ScalarFunctionCall:
         """A callable usable inside `pl.Expr.map_batches` (see `_scalar.py`)."""
         from vgi_polars._scalar import make_scalar_function
 
         return make_scalar_function(self, schema_name, name)
 
-    def table_in_out_function(self, schema_name: str, name: str):
-        """A callable `fn(lf: pl.LazyFrame, *, settings=None) -> pl.LazyFrame`
-        for a streaming or buffered table-in-out function (see
-        `_table_in_out.py`)."""
+    def table_in_out_function(self, schema_name: str, name: str) -> TableInOutFunction:
+        """Return a callable for a streaming or buffered table-in-out function.
+
+        The returned callable has signature `fn(lf: pl.LazyFrame, *,
+        settings=None) -> pl.LazyFrame` (see `_table_in_out.py`).
+        """
         from vgi_polars._table_in_out import make_table_in_out_function
 
         return make_table_in_out_function(self, schema_name, name)
 
-    def aggregate_function(self, schema_name: str, name: str):
-        """An eager callable `fn(df: pl.DataFrame, *, group_by=(), ...) ->
-        pl.DataFrame` for an aggregate function (see `_aggregate.py`)."""
+    def aggregate_function(self, schema_name: str, name: str) -> AggregateFunction:
+        """Return an eager callable for an aggregate function.
+
+        The returned callable has signature `fn(df: pl.DataFrame, *,
+        group_by=(), ...) -> pl.DataFrame` (see `_aggregate.py`).
+        """
         from vgi_polars._aggregate import make_aggregate_function
 
         return make_aggregate_function(self, schema_name, name)
 
     def detach(self) -> None:
-        """Detach from the catalog and close the underlying client(s) —
-        including every per-thread exchange client `_exchange_client()`
-        created. Safe to call more than once."""
+        """Detach from the catalog and close the underlying client(s).
+
+        Closes every per-thread exchange client `_exchange_client()` created.
+        Safe to call more than once.
+        """
         if self._detached:
             return
         self._detached = True
@@ -240,22 +282,26 @@ class VgiCatalog:
             with self._exchange_clients_lock:
                 exchange_clients, self._exchange_clients = self._exchange_clients, []
             for exchange_client in exchange_clients:
-                try:
+                # Best-effort cleanup: one client's failure to stop must never
+                # block stopping the rest.
+                with contextlib.suppress(Exception):
                     exchange_client.stop()
-                except Exception:  # noqa: BLE001, S110 - best-effort cleanup; one client's
-                    pass  # failure to stop must never block stopping the rest.
 
     def __enter__(self) -> Self:
+        """Support `with attach(...) as catalog:` — returns `self`."""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """Support `with attach(...) as catalog:` — calls `detach()`."""
         self.detach()
 
 
 def _detect_transport(location: str) -> Transport:
-    """Auto-detect transport from `location`'s scheme, mirroring the DuckDB
-    extension's LOCATION scheme table (`http://`/`https://` -> HTTP,
-    `tcp://` -> TCP, anything else -> subprocess/shlex argv)."""
+    """Auto-detect transport from `location`'s scheme.
+
+    Mirrors the DuckDB extension's LOCATION scheme table (`http://`/`https://`
+    -> HTTP, `tcp://` -> TCP, anything else -> subprocess/shlex argv).
+    """
     if location.startswith(("http://", "https://")):
         return "http"
     if location.startswith("tcp://"):
@@ -298,17 +344,22 @@ def attach(
         **client_kwargs: Passed through to `Client(...)` / `Client.from_http(...)`
             / `Client.from_tcp(...)`.
 
+    Returns:
+        The attached `VgiCatalog`.
+
     """
     resolved_transport = transport if transport is not None else _detect_transport(location)
 
     def client_factory() -> Client:
-        """Build one fresh, unstarted `Client` connected the same way every
-        time — used both for the initial attach-time client and, via
+        """Build one fresh, unstarted `Client` connected the same way every time.
+
+        Used both for the initial attach-time client and, via
         `VgiCatalog._exchange_client()`, once per thread thereafter (see the
         module docstring's "Thread safety" section). No `catalog_attach` here
         — exchange-mode RPCs (`table_function`/`scalar_function`/...) don't
         take `attach_opaque_data` at all, so a fresh connection is immediately
-        usable with no re-attach step."""
+        usable with no re-attach step.
+        """
         if resolved_transport == "subprocess":
             return Client(location, worker_limit=worker_limit, **client_kwargs)
         if resolved_transport == "http":
@@ -330,10 +381,8 @@ def attach(
         # secondary failure that would mask the real one. Best-effort only:
         # deliberately swallows anything, since we're already unwinding a
         # real error and a cleanup failure must never shadow it.
-        try:
+        with contextlib.suppress(Exception):
             client.stop()
-        except Exception:  # noqa: BLE001, S110 - intentional best-effort cleanup, see above
-            pass
 
     try:
         client.start()

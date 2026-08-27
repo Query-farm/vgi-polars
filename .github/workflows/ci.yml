@@ -37,6 +37,7 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
+      - run: uvx ruff format --check src/ tests/
       - run: uvx ruff check src/ tests/
 
   build:
@@ -89,6 +90,17 @@ jobs:
         working-directory: vgi-polars
         run: uv sync
 
+      # Needs the full sibling-checkout environment (vgi-python's types, not
+      # just vgi-polars' own code) to resolve imports, so it lives in this
+      # job rather than `lint` — mirrors vgi-python's own "Type check (mypy)"
+      # CI step, just riding this job's existing sibling setup instead of a
+      # dedicated one.
+      - name: Type check (mypy)
+        working-directory: vgi-polars
+        run: uv run mypy src/
+
+      # Docstring consistency (pydoclint) runs inside the pytest suite via
+      # tests/test_docstrings.py, mirroring vgi-python — not a separate step.
       - name: Run tests
         working-directory: vgi-polars
         env:

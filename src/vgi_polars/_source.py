@@ -42,21 +42,45 @@ dark.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any, Protocol
 
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
 
 from vgi_polars._filter_translate import translate_predicate
+from vgi_polars._polars_compat import arrow_to_df
 from vgi_polars._result_cache import get_default_cache, parse_cache_control
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
+    from vgi.catalog.catalog_interface import FunctionInfo, ScanFunctionResult
     from vgi.client.client import Client
 
-    from vgi_polars.table import VgiTable
+    from vgi_polars.catalog import VgiCatalog
+
+
+class _ScanSource(Protocol):
+    """What `make_io_source` needs from its `table` argument.
+
+    `VgiTable` satisfies this structurally, as does `_multi_branch.py`'s
+    duck-typed `_BranchTable` (one `ScanBranch` masquerading as a table for
+    exactly this function) — making the duck-typing explicit and
+    mypy-checkable, rather than accepting `Any`.
+    """
+
+    _catalog: VgiCatalog
+    schema_name: str
+    name: str
+    at_unit: str | None
+    at_value: str | None
+
+    def _scan_function_get(self) -> ScanFunctionResult: ...
+    def _function_info_get(self) -> FunctionInfo | None: ...
+    def scan_function_schema(self) -> str: ...
+    def required_filters(self) -> list[list[str]]: ...
+
 
 # `hasattr`-style capability guard for `batch_metadata_callback` (new — see
 # CLAUDE.md's "Table-function result cache" section), computed once. Mirrors
@@ -84,13 +108,15 @@ except Exception:  # noqa: BLE001 - never let a capability probe break import
 
 
 def _canonical_arguments(arguments: Arguments) -> tuple[Any, ...] | None:
-    """A hashable snapshot of `arguments`' values for use in a cache key, or
-    `None` if any value isn't (e.g. a struct/list-typed argument decodes to
-    an unhashable `dict`/`list` via `.as_py()`) — caching is just skipped for
-    that call, never a correctness issue (mirrors `_scalar.py`'s
-    `_dedup_positions` unhashable fallback)."""
+    """A hashable snapshot of `arguments`' values for use in a cache key.
+
+    Returns `None` if any value isn't hashable (e.g. a struct/list-typed argument
+    decodes to an unhashable `dict`/`list` via `.as_py()`) — caching is just skipped
+    for that call, never a correctness issue (mirrors `_scalar.py`'s
+    `_dedup_positions` unhashable fallback).
+    """
     try:
-        positional = tuple(s.as_py() for s in arguments.positional)
+        positional = tuple(s.as_py() if s is not None else None for s in arguments.positional)
         named = tuple(sorted((k, v.as_py()) for k, v in (arguments.named or {}).items()))
         hash((positional, named))
     except TypeError:
@@ -98,11 +124,14 @@ def _canonical_arguments(arguments: Arguments) -> tuple[Any, ...] | None:
     return positional, named
 
 
-def _check_required_filters(required_filters: list[list[str]], predicate: pl.Expr | None, schema_name: str, name: str) -> None:
-    """Cost-safety guard (not a correctness one — see `VgiTable.required_filters`'s
-    docstring). `required_filters` is an AND-of-OR-groups of column names; a group
-    entry may be a dotted struct-subfield path (e.g. `"s.a"`), which `root_names()`
-    can't see through (it reports the top-level `Column` reference, `"s"`, not the
+def _check_required_filters(
+    required_filters: list[list[str]], predicate: pl.Expr | None, schema_name: str, name: str
+) -> None:
+    """Cost-safety guard, not a correctness one — see `VgiTable.required_filters`'s docstring.
+
+    `required_filters` is an AND-of-OR-groups of column names; a group entry may
+    be a dotted struct-subfield path (e.g. `"s.a"`), which `root_names()` can't
+    see through (it reports the top-level `Column` reference, `"s"`, not the
     subfield actually touched inside a `.struct.field(...)` chain). Rather than
     parse struct-access expressions to verify the exact subfield, this takes the
     conservative approximation the plan calls for: a dotted requirement is
@@ -110,7 +139,8 @@ def _check_required_filters(required_filters: list[list[str]], predicate: pl.Exp
     all (i.e. `"s.a"` is satisfied by any predicate touching `"s"`) — this can
     pass a predicate that doesn't actually touch the required subfield, but it
     never *blocks* a query that does, and it's a safety net against the common
-    case (no filter at all), not a full pushdown-translatability check."""
+    case (no filter at all), not a full pushdown-translatability check.
+    """
     if not required_filters:
         return
     referenced = set(predicate.meta.root_names()) if predicate is not None else set()
@@ -131,9 +161,11 @@ def _check_required_filters(required_filters: list[list[str]], predicate: pl.Exp
 
 
 class _RemainingBudget:
-    """Mutable `n_rows` tracker shared across possibly-many `table_function`
-    calls (one whole-scan call, or one per split) so an early exit partway
-    through one call can also stop the caller from starting the next one."""
+    """Mutable `n_rows` tracker shared across possibly-many `table_function` calls.
+
+    Shared across one whole-scan call, or one per split, so an early exit
+    partway through one call can also stop the caller from starting the next one.
+    """
 
     __slots__ = ("exhausted", "remaining")
 
@@ -149,11 +181,13 @@ def _process_batches(
     predicate: pl.Expr | None,
     budget: _RemainingBudget,
 ) -> Iterator[pl.DataFrame]:
-    """Convert, rename, re-filter/re-select, and `n_rows`-truncate one
-    `table_function` generator's batches — shared by the whole-scan and
-    per-split paths so both get identical Design Principle 1 treatment."""
+    """Convert, rename, re-filter/re-select, and `n_rows`-truncate one `table_function` generator's batches.
+
+    Shared by the whole-scan and per-split paths so both get identical Design
+    Principle 1 treatment.
+    """
     for batch in gen:
-        df = pl.from_arrow(batch)
+        df = arrow_to_df(batch)
         # The resolved scan function's own column names are an implementation
         # detail that need not match the catalog's declared TableInfo.columns
         # names (observed live against vgi-fixture-worker's `data.numbers`:
@@ -180,10 +214,12 @@ def _process_batches(
 
 
 def _tee_batches(gen: Iterator[pa.RecordBatch], sink: list[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
-    """Pass batches through unchanged while also appending each to `sink` —
-    lets the result-cache path capture the raw worker output alongside
-    driving the normal `_process_batches` local-refilter pipeline, without
-    duplicating the RPC."""
+    """Pass batches through unchanged while also appending each to `sink`.
+
+    Lets the result-cache path capture the raw worker output alongside driving
+    the normal `_process_batches` local-refilter pipeline, without duplicating
+    the RPC.
+    """
     for batch in gen:
         sink.append(batch)
         yield batch
@@ -198,16 +234,18 @@ def _iter_splits_sequential(
     projection_ids: list[int] | None,
     pushdown_filters: bytes | None,
 ) -> Iterator[tuple[Any, bytes | None, bytes | None]]:
-    """Yield `(split, execution_id, init_opaque_data)` for every split of this
-    scan, draining `PlanResponse.next_cursors` pagination sequentially via a
-    queue rather than a single resume pointer: a plan response may hand back
-    *more than one* continuation cursor at once (parallel enumeration
-    branches — see `Client.table_function_plan`'s docstring), and this
-    consumer is single-threaded, so it just visits each branch in turn
-    instead of fanning out. `execution_id`/`init_opaque_data` are carried per
-    plan response (not assumed stable across pages) and threaded back into
-    each of that page's splits' redemption, for a worker whose splits share
-    cross-process state via `BoundStorage`."""
+    """Yield `(split, execution_id, init_opaque_data)` for every split of this scan.
+
+    Drains `PlanResponse.next_cursors` pagination sequentially via a queue
+    rather than a single resume pointer: a plan response may hand back *more
+    than one* continuation cursor at once (parallel enumeration branches —
+    see `Client.table_function_plan`'s docstring), and this consumer is
+    single-threaded, so it just visits each branch in turn instead of fanning
+    out. `execution_id`/`init_opaque_data` are carried per plan response (not
+    assumed stable across pages) and threaded back into each of that page's
+    splits' redemption, for a worker whose splits share cross-process state
+    via `BoundStorage`.
+    """
     queue: list[bytes | None] = [None]
     while queue:
         cursor = queue.pop(0)
@@ -225,7 +263,11 @@ def _iter_splits_sequential(
             queue.extend(plan.next_cursors)
 
 
-def make_io_source(table: VgiTable, arrow_schema: pa.Schema):
+#: The callback shape `polars.io.plugins.register_io_source` expects.
+IoSource = Callable[[list[str] | None, "pl.Expr | None", "int | None", "int | None"], Iterator[pl.DataFrame]]
+
+
+def make_io_source(table: _ScanSource, arrow_schema: pa.Schema) -> IoSource:
     column_names = list(arrow_schema.names)
 
     def io_source(

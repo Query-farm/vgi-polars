@@ -1,8 +1,9 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Split-aware scanning (`_source.py`'s `_iter_splits_sequential` +
-`function_info.supports_splits` gate) — against the real `split_sequence`/
-`split_zero` fixtures (`vgi/_test_fixtures/table/splits.py`), which needed
+"""Split-aware scanning.
+
+Exercises `_source.py`'s `_iter_splits_sequential` + `function_info.supports_splits` gate — against
+the real `split_sequence`/`split_zero` fixtures (`vgi/_test_fixtures/table/splits.py`), which needed
 new upstream `vgi.client.Client` methods (`table_function_plan`,
 `table_function(split_tokens=...)`) that didn't exist before this: splits
 were entirely unreachable from `Client`, not just unsupported by vgi-polars.
@@ -13,7 +14,8 @@ entry (they're bare functions used by the DuckDB extension's own multi-branch/
 splits SQL suite) — mirrors `test_errors.py`'s `_FakeTableForScanFunction`
 pattern: a duck-typed stand-in implementing only what `make_io_source` calls
 on `table`, resolving a real `FunctionInfo` from the catalog rather than a
-mock, since the point here is exercising the real `supports_splits` flag."""
+mock, since the point here is exercising the real `supports_splits` flag.
+"""
 
 from __future__ import annotations
 
@@ -114,8 +116,10 @@ def test_split_zero_yields_no_rows(catalog: vp.VgiCatalog) -> None:
 
 @requires_split_support
 def test_split_scan_respects_local_predicate(catalog: vp.VgiCatalog) -> None:
-    """Design Principle 1 holds across splits too — the local re-filter
-    applies uniformly regardless of which split a row came from."""
+    """Design Principle 1 holds across splits too.
+
+    The local re-filter applies uniformly regardless of which split a row came from.
+    """
     t = _FakeSplitTable(catalog, "split_sequence", _args(n=20, splits=5))
     io_source = make_io_source(t, pa.schema([pa.field("n", pa.int64())]))
     dfs = list(io_source(with_columns=None, predicate=pl.col("n") >= 15, n_rows=None, batch_size=None))
@@ -125,9 +129,10 @@ def test_split_scan_respects_local_predicate(catalog: vp.VgiCatalog) -> None:
 
 @requires_split_support
 def test_split_scan_respects_n_rows_across_split_boundary(catalog: vp.VgiCatalog) -> None:
-    """`n_rows` truncation must stop the *whole* multi-split scan early, not
-    just the batch it happens to land in — `_RemainingBudget` is shared
-    across every split's `table_function` call for exactly this reason."""
+    """`n_rows` truncation must stop the *whole* multi-split scan early, not just the batch it lands in.
+
+    `_RemainingBudget` is shared across every split's `table_function` call for exactly this reason.
+    """
     t = _FakeSplitTable(catalog, "split_sequence", _args(n=40, splits=8))  # 5 rows/split
     io_source = make_io_source(t, pa.schema([pa.field("n", pa.int64())]))
     dfs = list(io_source(with_columns=None, predicate=None, n_rows=7, batch_size=None))
@@ -137,8 +142,10 @@ def test_split_scan_respects_n_rows_across_split_boundary(catalog: vp.VgiCatalog
 
 @requires_split_support
 def test_non_split_function_never_calls_plan(catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`supports_splits=False` (the plain `sequence` function) must take the
-    ordinary whole-scan path — `table_function_plan` is never called."""
+    """`supports_splits=False` (the plain `sequence` function) must take the ordinary whole-scan path.
+
+    `table_function_plan` is never called.
+    """
     t = _FakeSplitTable(catalog, "sequence", positional_arguments=[pa.scalar(5)])
     exchange_client = catalog._exchange_client()
     calls: list[Any] = []
@@ -157,11 +164,14 @@ def test_non_split_function_never_calls_plan(catalog: vp.VgiCatalog, monkeypatch
     assert calls == []
 
 
-def test_missing_table_function_plan_falls_back_cleanly(catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Simulates an installed vgi-python that predates `Client.
-    table_function_plan` (e.g. this repo's own CI, pinned to a released tag
+def test_missing_table_function_plan_falls_back_cleanly(
+    catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simulates an installed vgi-python that predates `Client.table_function_plan`.
+
+    This mirrors this repo's own CI, pinned to a released tag
     until it's bumped past one that includes it — see CLAUDE.md's "Splits"
-    section). The `hasattr` guard in `_source.py` takes the ordinary
+    section. The `hasattr` guard in `_source.py` takes the ordinary
     whole-scan path instead of raising `AttributeError` — every fixture in
     this module is deliberately split-*only* (see
     `vgi/_test_fixtures/table/splits.py`'s `_SplitBase.initial_state`), so
@@ -174,7 +184,8 @@ def test_missing_table_function_plan_falls_back_cleanly(catalog: vp.VgiCatalog, 
     (simulated absence via `monkeypatch.delattr`) and one that genuinely
     doesn't (nothing to patch — the scenario under test is already the
     ambient reality), so it always runs and is the one test in this module
-    that proves the graceful-degradation path itself."""
+    that proves the graceful-degradation path itself.
+    """
     t = _FakeSplitTable(catalog, "split_sequence", _args(n=9, splits=3))
     exchange_client = catalog._exchange_client()
     if _HAS_SPLIT_SUPPORT:
@@ -187,10 +198,11 @@ def test_missing_table_function_plan_falls_back_cleanly(catalog: vp.VgiCatalog, 
 
 @requires_split_support
 def test_split_scan_end_to_end_via_arguments_helper(catalog: vp.VgiCatalog) -> None:
-    """Sanity check that the fixture's own arg convention (named, via
-    `Arguments`) matches what `_FakeSplitTable`/`ScanFunctionResult` build —
-    catches an accidental positional/named mismatch independent of the
-    io_source machinery."""
+    """Sanity check that the fixture's own arg convention matches what `_FakeSplitTable` builds.
+
+    The convention is named, via `Arguments`; the built object is `ScanFunctionResult`. This
+    catches an accidental positional/named mismatch independent of the io_source machinery.
+    """
     args = Arguments(named=_args(n=6, splits=2))
     plan = catalog._exchange_client().table_function_plan(
         function_name="split_sequence", schema_name="main", arguments=args

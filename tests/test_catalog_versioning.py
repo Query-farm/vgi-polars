@@ -1,10 +1,12 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Catalog-versioning introspection (`VgiCatalog.catalog_version`,
-`resolved_data_version`, `resolved_implementation_version`, ...) and
-attach-option/version validation — against the `versioned` fixture catalog
-(`vgi/_test_fixtures/versioned.py`), which validates `data_version_spec`/
-`implementation_version` at ATTACH time and echoes back what it resolved.
+"""Catalog-versioning introspection and attach-option/version validation.
+
+Covers `VgiCatalog.catalog_version`, `resolved_data_version`,
+`resolved_implementation_version`, ... against the `versioned` fixture
+catalog (`vgi/_test_fixtures/versioned.py`), which validates
+`data_version_spec`/`implementation_version` at ATTACH time and echoes
+back what it resolved.
 
 "Attach-option validation" itself needs no new vgi-polars code: `attach()`
 already threads `options`/`data_version_spec`/`implementation_version`
@@ -13,7 +15,8 @@ straight through to `Client.catalog_attach`, and a worker-side rejection
 `VgiPolarsError` via the existing `VGI_CLIENT_ERRORS` wrapping — the tests
 below confirm that behavior end to end rather than adding a redundant
 client-side re-validation layer (VGI's design has the *worker* validate its
-own options; see CLAUDE.md's Scope section)."""
+own options; see CLAUDE.md's Scope section).
+"""
 
 from __future__ import annotations
 
@@ -64,19 +67,24 @@ def test_versioned_attach_with_unsatisfiable_implementation_version_raises(versi
 
 
 def test_attach_with_unknown_catalog_name_raises(versioned_worker_location: str) -> None:
-    """Same worker binary, wrong attach `name` — the worker rejects it and the
-    failure surfaces cleanly, exactly like an unrecognized attach option
-    would (this fixture happens not to validate options; the mechanism that
-    surfaces a rejection is identical either way, see module docstring)."""
+    """Same worker binary, wrong attach `name`.
+
+    The worker rejects it and the failure surfaces cleanly, exactly like
+    an unrecognized attach option would (this fixture happens not to
+    validate options; the mechanism that surfaces a rejection is identical
+    either way, see module docstring).
+    """
     with pytest.raises(VgiPolarsError, match="Unknown catalog"):
         vp.attach(versioned_worker_location, name="no_such_catalog")
 
 
 def test_unrecognized_attach_option_does_not_crash(worker_location: str) -> None:
-    """The `example` fixture worker (unlike `versioned`) doesn't validate its
-    options at all — an unrecognized one is silently ignored, a valid worker
-    choice VGI's design permits (the worker owns option validation, not the
-    client). Confirms vgi-polars doesn't second-guess that by rejecting
-    client-side."""
+    """The `example` fixture worker (unlike `versioned`) doesn't validate its options at all.
+
+    An unrecognized one is silently ignored, a valid worker choice VGI's
+    design permits (the worker owns option validation, not the client).
+    Confirms vgi-polars doesn't second-guess that by rejecting
+    client-side.
+    """
     with vp.attach(worker_location, name="example", options={"no_such_option_xyz": "value"}) as cat:
         assert "data" in cat.schemas()

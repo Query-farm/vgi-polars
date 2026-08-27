@@ -1,8 +1,10 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Table-in-out (streaming + buffered map-a-table) via `LazyFrame.map_batches`
-— see `_table_in_out.py`'s module docstring for the streaming-vs-buffering
-dispatch and the input-dependent-output-schema handling."""
+"""Table-in-out (streaming + buffered map-a-table) via `LazyFrame.map_batches`.
+
+See `_table_in_out.py`'s module docstring for the streaming-vs-buffering
+dispatch and the input-dependent-output-schema handling.
+"""
 
 from __future__ import annotations
 
@@ -21,9 +23,11 @@ def test_echo_streaming_passthrough(catalog: vp.VgiCatalog) -> None:
 
 
 def test_echo_buffering_passthrough(catalog: vp.VgiCatalog) -> None:
-    """`echo_buffering` is a `TableBufferingFunction` (Sink+Source) — same
-    observable result as the streaming `echo`, different RPC drive loop
-    underneath (`Client.table_buffering_function`, `streamable=False`)."""
+    """`echo_buffering` is a `TableBufferingFunction` (Sink+Source).
+
+    Same observable result as the streaming `echo`, different RPC drive loop
+    underneath (`Client.table_buffering_function`, `streamable=False`).
+    """
     echo_buffering = catalog.table_in_out_function("main", "echo_buffering")
     lf = pl.LazyFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
     out = echo_buffering(lf).collect()
@@ -39,9 +43,11 @@ def test_filter_by_setting(catalog: vp.VgiCatalog) -> None:
 
 
 def test_echo_empty_input(catalog: vp.VgiCatalog) -> None:
-    """The streaming path synthesizes a zero-row batch when Polars hands it
-    an empty chunk (`Client.table_in_out_function` requires >=1 input batch)
-    — confirms that synthesis doesn't break the empty-input case itself."""
+    """The streaming path synthesizes a zero-row batch when Polars hands it an empty chunk.
+
+    `Client.table_in_out_function` requires >=1 input batch — confirms that
+    synthesis doesn't break the empty-input case itself.
+    """
     echo = catalog.table_in_out_function("main", "echo")
     lf = pl.LazyFrame({"a": pl.Series([], dtype=pl.Int64), "b": pl.Series([], dtype=pl.Utf8)})
     out = echo(lf).collect()
@@ -55,12 +61,14 @@ def test_unknown_table_in_out_function_raises(catalog: vp.VgiCatalog) -> None:
 
 
 def test_accumulate_positional_and_named_args(accumulate_catalog: vp.VgiCatalog) -> None:
-    """`accumulate('events', result='new')` — one positional bind-time arg
-    (`name`, wire position 0, no `vgi_arg` metadata) plus a named one
-    (`result`, `vgi_arg=named`); confirms the positional/named/table-slot
-    split against real wire metadata, and that the real (not static-catalog)
-    output schema — including the `_timestamp` column the static
-    `FunctionInfo.output_schema` omits — is what `map_batches` actually gets."""
+    """`accumulate('events', result='new')` mixes a positional bind-time arg and a named one.
+
+    `name` is positional (wire position 0, no `vgi_arg` metadata) and `result` is named
+    (`vgi_arg=named`); confirms the positional/named/table-slot split against real wire
+    metadata, and that the real (not static-catalog) output schema — including the
+    `_timestamp` column the static `FunctionInfo.output_schema` omits — is what
+    `map_batches` actually gets.
+    """
     accumulate = accumulate_catalog.table_in_out_function("main", "accumulate")
     lf = pl.LazyFrame({"x": [1, 2, 3]})
     out = accumulate(lf, "test_accumulate_positional_and_named_args", result="new").collect()
@@ -81,11 +89,13 @@ def test_accumulate_unknown_named_arg_raises(accumulate_catalog: vp.VgiCatalog) 
 
 
 def test_scalar_function_name_not_found_as_table_in_out(catalog: vp.VgiCatalog) -> None:
-    """`multiply` is a scalar function — `schema_contents(type=TABLE_FUNCTION)`
-    (the catalog RPC `table_in_out_function` resolution uses) only ever lists
-    TABLE/TABLE_BUFFERING functions to begin with, so a scalar function's name
-    surfaces as "not found" here rather than a distinct "wrong kind" error;
-    still a clear `VgiPolarsError`, not a confusing downstream RPC failure."""
+    """`multiply` is a scalar function, so `table_in_out_function` resolution can't see it.
+
+    The catalog RPC `table_in_out_function` resolution uses `schema_contents(type=TABLE_FUNCTION)`,
+    which only ever lists TABLE/TABLE_BUFFERING functions to begin with, so a scalar function's
+    name surfaces as "not found" here rather than a distinct "wrong kind" error; still a clear
+    `VgiPolarsError`, not a confusing downstream RPC failure.
+    """
     fn = catalog.table_in_out_function("main", "multiply")
     with pytest.raises(VgiPolarsError, match="not found"):
         fn(pl.LazyFrame({"value": [1]}))
