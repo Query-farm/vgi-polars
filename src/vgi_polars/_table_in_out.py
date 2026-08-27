@@ -62,12 +62,30 @@ before planning a query) rather than trusting a static catalog hint.
 `Client.table_buffering_function` both hardcode `secrets=None` internally with
 no public parameter (unlike `Client.scalar_function` — see `_scalar.py`). A
 real vgi-python API gap, not a vgi-polars design choice.
+
+**`has_finalize` is forwarded from the catalog, never hardcoded.** Every
+`table_in_out_function()` call here spreads `has_finalize_kwarg`, built from
+`FunctionInfo.has_finalize` (the function's own declared value — a `TABLE`
+function may or may not implement finalize; only the caller's catalog
+metadata knows which). This isn't a blended-function-only concern —
+`_row_transform.py` needs `has_finalize=False` unconditionally because a
+blended function structurally never has one, but a plain `TableInOutGenerator`
+with no finalize override (`echo`, `filter_by_setting`, `repeat_inputs`, ...)
+has exactly the same shape and can hit the same interop hazard a strict
+worker SDK exposes: sending an unadvertised FINALIZE-phase `init()`. The
+Python fixture worker no-ops that gracefully either way, so this bridge's own
+test suite can't distinguish "forwarded correctly" from "never mattered
+locally" — the value is in not depending on every worker SDK tolerating a
+request it never declared support for. `has_finalize_kwarg` is `{}` (the old,
+unconditional-FINALIZE behavior) for a buffered function (no FINALIZE-phase
+concept exists there at all) or on a vgi-python predating the parameter.
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import polars as pl
 import pyarrow as pa
@@ -88,6 +106,31 @@ _VGI_TYPE_KEY = b"vgi_type"
 _VGI_TABLE_VALUE = b"table"
 _VGI_ARG_KEY = b"vgi_arg"
 _VGI_NAMED_VALUE = b"named"
+
+
+class _HasFinalizeKwargs(TypedDict, total=False):
+    """`**kwargs` spread shape for the `has_finalize` capability guard below — see `_row_transform.py`."""
+
+    has_finalize: bool
+
+
+# `has_finalize` (vgi-python >= 0.29.6) lets a caller that already knows a
+# function's FunctionInfo.has_finalize skip the FINALIZE-phase init() when
+# it's False, rather than sending one every worker SDK must tolerate. This
+# was added for _row_transform.py's blended functions (which are ALWAYS
+# has_finalize=False), but the same interop hazard applies to an ordinary
+# no-finalize TableInOutGenerator (echo, filter_by_setting, repeat_inputs,
+# ...) called against a worker SDK that rejects an unadvertised FINALIZE
+# init() outright rather than no-op'ing it (confirmed live against the
+# vgi-open-meteo TypeScript worker for the blended case) -- so this bridge
+# forwards the catalog's own per-function has_finalize too, not just a
+# hardcoded value. Capability-guarded the same way _SUPPORTS_RESULT_CACHE is.
+try:
+    from vgi.client.client import Client as _RuntimeClient
+
+    _SUPPORTS_HAS_FINALIZE = "has_finalize" in inspect.signature(_RuntimeClient.table_in_out_function).parameters
+except Exception:  # noqa: BLE001 - never let a capability probe break import
+    _SUPPORTS_HAS_FINALIZE = False
 
 
 def _is_table_field(field: pa.Field[Any]) -> bool:
@@ -141,6 +184,12 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
     def call(lf: pl.LazyFrame, *args: Any, settings: dict[str, Any] | None = None, **named_args: Any) -> pl.LazyFrame:
         info = _function_info()
         is_buffering = info.function_type == FunctionType.TABLE_BUFFERING
+        # table_buffering_function has no has_finalize parameter at all (a
+        # buffered function's Sink+Source shape has no FINALIZE-phase concept
+        # to skip) -- only ever build/spread this for the streaming method.
+        has_finalize_kwarg: _HasFinalizeKwargs = (
+            {"has_finalize": info.has_finalize} if not is_buffering and _SUPPORTS_HAS_FINALIZE else {}
+        )
 
         arg_schema = pa.ipc.read_schema(pa.py_buffer(info.arguments)) if info.arguments else pa.schema([])
         positional_fields = [f for f in arg_schema if not _is_table_field(f) and not _is_named_field(f)]
@@ -174,20 +223,37 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
         # with a zero-row input batch shaped like `lf`'s own schema, via
         # `bind_result_callback`, and use ITS output_schema.
         exchange_client = catalog._exchange_client()
-        method = exchange_client.table_buffering_function if is_buffering else exchange_client.table_in_out_function
         probe_batch = pa.RecordBatch.from_pylist([], schema=lf.collect_schema().to_arrow())
         bound: dict[str, pa.Schema] = {}
         try:
-            list(
-                method(
-                    function_name=name,
-                    schema_name=schema_name,
-                    input=iter([probe_batch]),
-                    arguments=arguments,
-                    settings=settings,
-                    bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+            # Explicit branches, not a polymorphic `method` variable: mypy
+            # can't verify has_finalize_kwarg is always empty when calling
+            # table_buffering_function (which has no such parameter at all)
+            # from a shared call expression's static type alone -- only this
+            # branch structure lets it see each call site's real signature.
+            if is_buffering:
+                list(
+                    exchange_client.table_buffering_function(
+                        function_name=name,
+                        schema_name=schema_name,
+                        input=iter([probe_batch]),
+                        arguments=arguments,
+                        settings=settings,
+                        bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+                    )
                 )
-            )
+            else:
+                list(
+                    exchange_client.table_in_out_function(
+                        function_name=name,
+                        schema_name=schema_name,
+                        input=iter([probe_batch]),
+                        arguments=arguments,
+                        settings=settings,
+                        bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+                        **has_finalize_kwarg,
+                    )
+                )
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
         if "schema" not in bound:
@@ -209,18 +275,30 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
                 # from multiple threads (confirmed live) — must use a
                 # per-thread client, never one shared across calls.
                 exchange_client = catalog._exchange_client()
-                method = (
-                    exchange_client.table_buffering_function if is_buffering else exchange_client.table_in_out_function
-                )
-                out_batches = list(
-                    method(
-                        function_name=name,
-                        schema_name=schema_name,
-                        input=iter(batches),
-                        arguments=arguments,
-                        settings=settings,
+                # Explicit branches -- see the probe-bind's identical comment
+                # above for why a shared polymorphic `method` variable can't
+                # be spread with has_finalize_kwarg and still type-check.
+                if is_buffering:
+                    out_batches = list(
+                        exchange_client.table_buffering_function(
+                            function_name=name,
+                            schema_name=schema_name,
+                            input=iter(batches),
+                            arguments=arguments,
+                            settings=settings,
+                        )
                     )
-                )
+                else:
+                    out_batches = list(
+                        exchange_client.table_in_out_function(
+                            function_name=name,
+                            schema_name=schema_name,
+                            input=iter(batches),
+                            arguments=arguments,
+                            settings=settings,
+                            **has_finalize_kwarg,
+                        )
+                    )
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
 
