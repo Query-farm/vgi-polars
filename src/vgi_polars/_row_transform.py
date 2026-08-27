@@ -10,9 +10,23 @@ input_from_args` (`function_type` is the same `TABLE` value an ordinary
 table-in-out function uses — see `_table_in_out.py`). vgi-polars only reaches
 this through `Client.table_in_out_function` (exchange mode): the caller
 synthesizes the input batch itself — an N-row batch built from `lf`'s columns
-for the column/LATERAL shape (this module, "slice 1" — the only shape
-implemented so far), or a 1-row batch of literals for the bare-literal-call
-shape (not yet implemented; `call(lf=None, ...)` raises a clear error).
+for the column/LATERAL shape ("slice 1"), or a 1-row batch of literals for
+the bare-literal-call shape (`call(lf=None, ...)`, "slice 3", below).
+
+**The literal-call shape needs no `parent_row` at all.** There is no outer
+`lf` to stamp columns from — the result IS the worker's own output columns,
+whatever cardinality it emits for the one synthesized input row (1->1, 1->N,
+or 1->0). So `_make_literal_call` below never passes `parent_row_callback`
+and never decodes provenance; it just concatenates whatever `out_batches`
+comes back. This is a real simplification over the column path, not a
+shortcut — there is nothing to gather, so there is nothing that can be
+gathered wrong. Routed via `pl.defer`, not a hand-rolled
+`register_io_source`: a literal call has no scan cost to optimize, no
+splits, and a shape that's exactly `pl.defer`'s `Callable[[], DataFrame]`
+contract (`pl.defer` is itself built on `register_io_source` as the
+single-shot special case). Still goes through `catalog._exchange_client()`,
+not `catalog.client` — `pl.defer` inherits `register_io_source`'s
+concurrent-instances hazard even though its own docs don't mention it.
 
 **Row provenance is a correctness requirement, not an optimization.** Unlike
 scan pushdown (`_source.py`'s Design Principle 1 — always locally
@@ -74,7 +88,10 @@ count is unimplemented and out of scope for slice 1.
 **Literal-call precedence rule.** `lf is not None` always takes the column
 path, even when every arg passed is a plain literal (broadcast to every row
 via `pl.lit`) — `lf`'s presence, not "are any args exprs," decides which path
-runs. `lf is None` is the bare-literal-call shape, not yet implemented here.
+runs. `lf is None` is the bare-literal-call shape: every positional arg must
+then be a plain value, never a `pl.Expr` (there is no frame to evaluate one
+against) — checked explicitly rather than left to fail confusingly inside
+`pl.lit`/Arrow conversion.
 """
 
 from __future__ import annotations
@@ -137,15 +154,61 @@ def _validate_parent_row(indices: list[int], *, bound: int) -> None:
             raise VgiPolarsError(f"parent_row-derived index {idx} out of range [0, {bound}) -- refusing to gather")
 
 
+def _make_literal_call(
+    *,
+    catalog: VgiCatalog,
+    schema_name: str,
+    name: str,
+    args: tuple[Any, ...],
+    positional_fields: list[pa.Field[Any]],
+    arguments: Arguments | None,
+    settings: dict[str, Any] | None,
+    worker_out_schema: pl.Schema,
+) -> pl.LazyFrame:
+    """The bare-literal-call shape (`fn(None, 52.0, 13.0)`) via `pl.defer`.
+
+    No `parent_row` decoding here at all — see module docstring's "The
+    literal-call shape needs no parent_row" section: there's no outer frame
+    to gather from, so the result is simply whatever the worker emits for
+    the one synthesized input row, concatenated as-is.
+    """
+
+    def literal_fn() -> pl.DataFrame:
+        row = dict(zip((f.name for f in positional_fields), args, strict=True))
+        input_batch = pa.RecordBatch.from_pylist([row], schema=pa.schema(positional_fields))
+        try:
+            # A fresh per-call exchange client, same rationale as the column
+            # path's bridge_fn — pl.defer's function is the concurrent-
+            # instances hazard register_io_source has, so nothing here may
+            # be shared across calls.
+            out_batches = list(
+                catalog._exchange_client().table_in_out_function(
+                    function_name=name,
+                    schema_name=schema_name,
+                    input=iter([input_batch]),
+                    arguments=arguments,
+                    settings=settings,
+                )
+            )
+        except VGI_CLIENT_ERRORS as e:
+            raise VgiPolarsError(str(e)) from e
+        if not out_batches:
+            return pl.DataFrame(schema=worker_out_schema)
+        return arrow_to_df(pa.Table.from_batches(out_batches))
+
+    return pl.defer(literal_fn, schema=worker_out_schema)
+
+
 def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str) -> RowTransformFunctionCall:
     """Return a callable for the blended row-transform function `schema_name.name`.
 
     The returned callable has signature `fn(lf: pl.LazyFrame | None = None,
     *args, settings=None, dedup=True, **named_args) -> pl.LazyFrame`. Each
     positional `arg` is either a `pl.Expr` (a column reference into `lf`,
-    requires `lf`) or a plain literal (broadcast to every row). `lf=None`
-    (the bare-literal-call shape) is not yet supported and raises a clear
-    error. The `FunctionInfo` is resolved on first use and cached.
+    requires `lf`) or a plain literal (broadcast to every row when `lf` is
+    given). `lf=None` is the bare-literal-call shape (`fn(None, 52.0,
+    13.0)`) — every positional arg must then be a plain value, never a
+    `pl.Expr`. The `FunctionInfo` is resolved on first use and cached.
     """
     cache: dict[str, FunctionInfo] = {}
 
@@ -185,11 +248,6 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
                 f"{schema_name}.{name}: row-transform functions need a newer vgi-python "
                 "(Client.table_in_out_function predates parent_row_callback on the installed version)"
             )
-        if lf is None:
-            raise VgiPolarsError(
-                f"{schema_name}.{name}: literal calls (no `lf`) are not yet supported -- "
-                "pass a pl.LazyFrame, e.g. cat.row_transform_function(...)(lf, pl.col('x'), pl.col('y'))"
-            )
 
         info = _function_info()
         arg_schema = pa.ipc.read_schema(pa.py_buffer(info.arguments)) if info.arguments else pa.schema([])
@@ -209,21 +267,26 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
                     f"{schema_name}.{name}: named argument '{k}' is a bind-time parameter — "
                     "pass a plain Python value, not a pl.Expr"
                 )
+        if lf is None:
+            for i, (v, f) in enumerate(zip(args, positional_fields, strict=True)):
+                if isinstance(v, pl.Expr):
+                    raise VgiPolarsError(
+                        f"{schema_name}.{name}: positional argument {i} ('{f.name}') is a pl.Expr but "
+                        "no `lf` was given -- a literal call needs a plain Python value for every "
+                        "positional argument"
+                    )
 
         arguments = None
         if named_args:
             arguments = Arguments(named={k: to_scalar(v, named_fields[k].type) for k, v in named_args.items()})
 
-        arg_exprs = [
-            (v if isinstance(v, pl.Expr) else pl.lit(v)).alias(f.name)
-            for v, f in zip(args, positional_fields, strict=True)
-        ]
-
         # Output schema is resolved via a real, eager probe bind — never
         # trusted from the static FunctionInfo.output_schema (same rationale
         # as _table_in_out.py). A blended function's declared arg schema is
         # fully self-described independent of any `lf`, so the probe batch
-        # is built straight from `positional_fields`, not from `lf`'s schema.
+        # is built straight from `positional_fields`, not from `lf`'s schema
+        # — this is what makes probe-bind call-shape-agnostic, backing both
+        # the literal and column entry points below with one bind.
         probe_batch = pa.RecordBatch.from_pylist([], schema=pa.schema(positional_fields))
         bound: dict[str, pa.Schema] = {}
         try:
@@ -242,6 +305,23 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
         if "schema" not in bound:
             raise VgiPolarsError(f"{schema_name}.{name}: worker never returned a bind response")
         worker_out_schema = arrow_to_df(bound["schema"].empty_table()).schema
+
+        if lf is None:
+            return _make_literal_call(
+                catalog=catalog,
+                schema_name=schema_name,
+                name=name,
+                args=args,
+                positional_fields=positional_fields,
+                arguments=arguments,
+                settings=settings,
+                worker_out_schema=worker_out_schema,
+            )
+
+        arg_exprs = [
+            (v if isinstance(v, pl.Expr) else pl.lit(v)).alias(f.name)
+            for v, f in zip(args, positional_fields, strict=True)
+        ]
 
         lf_schema = lf.collect_schema()
         collisions = sorted(set(worker_out_schema) & set(lf_schema))

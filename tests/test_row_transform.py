@@ -1,12 +1,12 @@
 # Copyright 2026 Query Farm LLC - https://query.farm
 
-"""Blended row-transform (`RowTransformFunction`) -> `LazyFrame.map_batches` bridge.
+"""Blended row-transform (`RowTransformFunction`) -> `LazyFrame`/`pl.defer` bridge.
 
 See `_row_transform.py`'s module docstring for the mechanism, the gather-safety
 finding, the outer-column policy, and the dedup group-and-replicate composition
 this exercises directly (`test_dedup_duplicate_outer_rows_each_get_their_own_output`).
-Slice 1 only — the column/LATERAL call shape; `fn(None, ...)` (a bare literal
-call) is not yet supported.
+Covers both call shapes: the column/LATERAL path (`fn(lf, pl.col(...))`, `map_batches`)
+and the bare-literal-call path (`fn(None, ...)`, `pl.defer` — see `TestLiteralCall`).
 """
 
 from __future__ import annotations
@@ -92,11 +92,43 @@ class TestHostileProvenance:
             hostile(lf, pl.col("x"), mode=mode).collect()
 
 
-def test_literal_call_not_yet_supported(catalog: vp.VgiCatalog) -> None:
-    """`fn(None, ...)` -- the bare-literal-call shape -- raises a clear, named error."""
-    geo_encode = catalog.row_transform_function("main", "geo_encode")
-    with pytest.raises(VgiPolarsError, match="not yet supported"):
-        geo_encode(None, 52.0, 13.0)
+class TestLiteralCall:
+    """`fn(None, ...)` -- the bare-literal-call shape, routed through `pl.defer`."""
+
+    def test_1_to_1(self, catalog: vp.VgiCatalog) -> None:
+        geo_encode = catalog.row_transform_function("main", "geo_encode")
+        out = geo_encode(None, 52.0, 13.0, precision=1).collect()
+        assert out["geohash"].to_list() == ["52.0:13.0"]
+
+    def test_1_to_n_fan_out(self, catalog: vp.VgiCatalog) -> None:
+        """A literal call has no outer frame, so the result is JUST the worker's own output rows."""
+        explode = catalog.row_transform_function("main", "blended_explode")
+        out = explode(None, 3).collect()
+        assert out["i"].to_list() == [0, 1, 2]
+
+    def test_1_to_0_filtered(self, catalog: vp.VgiCatalog) -> None:
+        explode = catalog.row_transform_function("main", "blended_explode")
+        out = explode(None, 0).collect()
+        assert out.height == 0
+        assert out.schema.names() == ["i"]
+
+    def test_expr_arg_with_no_lf_raises(self, catalog: vp.VgiCatalog) -> None:
+        """A `pl.Expr` needs a frame to evaluate against -- nonsensical with `lf=None`."""
+        geo_encode = catalog.row_transform_function("main", "geo_encode")
+        with pytest.raises(VgiPolarsError, match="pl.Expr but no `lf`"):
+            geo_encode(None, pl.col("lat"), 13.0)
+
+    def test_named_arg_threading(self, catalog: vp.VgiCatalog) -> None:
+        """Bind-time named args work identically to the column path."""
+        geo_encode = catalog.row_transform_function("main", "geo_encode")
+        out = geo_encode(None, 52.0, 13.0, precision=0).collect()
+        assert out["geohash"].to_list() == ["52.0:13.0"]
+
+    def test_hostile_provenance_worker_ignored_safely(self, catalog: vp.VgiCatalog) -> None:
+        """A malformed vgi_rpc.parent_row is simply never read here -- the row count is what it is."""
+        hostile = catalog.row_transform_function("main", "hostile_provenance")
+        out = hostile(None, 7, mode="range").collect()
+        assert out["hv"].to_list() == [7]
 
 
 def test_lf_presence_decides_the_path_not_arg_shape(catalog: vp.VgiCatalog) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "vgi-polars"
-version = "0.2.0"
+version = "0.3.0"
 description = "Polars connector for VGI (Vector Gateway Interface) — scan VGI catalog tables and call VGI functions from Polars"
 readme = "README.md"
 keywords = [

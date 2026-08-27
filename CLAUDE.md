@@ -176,7 +176,12 @@ buffered table-in-out functions via `pl.LazyFrame.map_batches` incl. positional/
 named bind-time arguments (`_table_in_out.py` — covers `accumulate`/
 `accumulate_read`/`accumulate_clear` too, no dedicated code needed), aggregate
 functions via an eager `pl.DataFrame` bridge incl. `ConstParam` args
-(`_aggregate.py`), thread-safe exchange-mode calls (see "Thread safety" above),
+(`_aggregate.py`), blended (row-transform) table functions — both the
+correlated/column shape (`map_batches` + `vgi_rpc.parent_row` provenance
+decoding) and the bare literal-call shape (`pl.defer`) — via
+`cat.row_transform_function(schema, name)` (`_row_transform.py`, see the
+dedicated paragraph below for the design), thread-safe exchange-mode calls
+(see "Thread safety" above),
 HTTP bearer auth, protocol-robustness (bad-protocol-version/bad-enum-wire/
 mid-stream error) handling, per-chunk scalar input dedup (`dedup=True` default
 on every scalar-function callable, the client-side mirror of the C++
@@ -348,21 +353,26 @@ Polars-side "attach another catalog" concept, needs its own research pass);
 `TableInfo.supports_time_travel` per-table discovery (see "Time travel" above — a
 genuine wire-schema addition, needs a protocol bump + C++ codegen regen).
 
-**Not implemented: blended (row-transform) table functions / correlated LATERAL
-joins.** A worker function called directly with caller-supplied literal or
-column arguments and no separate table input. Confirmed absent by direct
-investigation: no `blended`/`row_transform`/`input_from_args` reference
-anywhere in this repo. The public `open_meteo` VGI worker
-(github.com/Query-farm/vgi-open-meteo — see its `src/functions.ts`, "All of
-them are **blended row-transform** functions") has *zero* plain catalog
-tables reachable via `cat.table(schema, name)`; every one of its functions
-(`geocoding`, `forecast_hourly`, etc.) needs this shape, so none of it is
-reachable from vgi-polars today — only its sibling `vgi-earthquakes` worker
-(a genuine table, `main.recent`; see the README's live example) is.
-`table_in_out_function` doesn't cover this either — it requires an existing
-`LazyFrame`/`DataFrame` as input, which a blended call in its literal-args
-form doesn't have. Needs its own bridge design, not an extension of an
-existing one.
+**Implemented: blended (row-transform) table functions / correlated LATERAL
+joins** (`cat.row_transform_function(schema, name)`, `src/vgi_polars/
+_row_transform.py`). A worker function called directly with caller-supplied
+literal or column arguments and no separate table input — the shape the
+public `open_meteo` worker (github.com/Query-farm/vgi-open-meteo,
+`geocoding`/`forecast_hourly`/etc.) needs, since it has zero plain catalog
+tables reachable via `cat.table(schema, name)` and `table_in_out_function`
+can't cover it either (it requires an existing `LazyFrame`/`DataFrame` as
+input, which a blended call in its literal-args form doesn't have). Two call
+shapes, one bridge, dispatched on whether `lf` is given: the correlated/
+column shape (`FROM t, f(t.x)`) routes through `LazyFrame.map_batches`,
+decoding the worker's `vgi_rpc.parent_row` provenance (via vgi-python's
+`Client.table_in_out_function(parent_row_callback=...)`, v0.29.5+) to
+correctly re-associate a 1->N/1->0 emit's outer columns; the bare
+literal-call shape (`f(None, 'some place')`) routes through `pl.defer`
+instead and needs no provenance at all (there's no outer frame to stamp).
+See `_row_transform.py`'s module docstring for the full design — gather
+safety, the outer-column policy, and the dedup group-and-replicate
+composition (two real bugs were caught and fixed against exactly those
+during implementation).
 
 **`launch:` LOCATIONs — implemented in vgi-python, not yet wired in here.**
 `vgi.client.Client.from_launch(...)` / `transport="launch"` (vgi-python

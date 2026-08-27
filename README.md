@@ -160,6 +160,11 @@ than strictly necessary — never a correctness one.
 - Time-travel scans (`AT` clauses)
 - Scalar function calls with scoped secrets and per-chunk input dedup
 - Streaming and buffered table-in-out functions
+- Blended (row-transform) table functions (`cat.row_transform_function(schema, name)`) —
+  a worker function called with caller-supplied literal or column arguments and no
+  separate table input, both the correlated-join shape (DuckDB's `SELECT * FROM t,
+  LATERAL geocode(t.place)` equivalent: `geocode(lf, pl.col("place"))`) and the bare
+  literal-call shape (`geocode(None, 'some place')`)
 - Aggregate functions
 - Subprocess, HTTP, and TCP transports
 
@@ -168,13 +173,6 @@ than strictly necessary — never a correctness one.
 - Writes
 - Companion-catalog federation
 - Per-table time-travel discovery
-- Blended (row-transform) table functions — a worker function called with caller-supplied
-  literal or column arguments and no separate table input (DuckDB's `SELECT * FROM
-  t, LATERAL geocode(t.place)`-style correlated join, or a bare `geocode('some place')`
-  literal call). vgi-polars can only scan pre-registered catalog *tables*
-  (`cat.table(schema, name)`) and drive *table-in-out* functions that transform an
-  existing `LazyFrame`/`DataFrame` — there's no bridge yet for a table-producing
-  function invoked directly with its own arguments.
 - The `container://`/`github://` transport schemes (a substantially larger effort — a
   from-scratch Python transport layer, not an extension of the existing scheme table).
   `launch:`/`unix://` (a launcher-managed shared worker) is implemented in the
