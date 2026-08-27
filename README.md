@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Query-farm/vgi-polars/main/docs/vgi-logo.png?v=1" alt="VGI logo" width="260">
+  &nbsp;&nbsp;+&nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/Query-farm/vgi-polars/main/docs/polars-logo.svg?v=1" alt="Polars logo" width="130">
+</p>
+
 # vgi-polars
 
 [![PyPI](https://img.shields.io/pypi/v/vgi-polars.svg)](https://pypi.org/project/vgi-polars/)
@@ -78,19 +84,30 @@ was pushed down. Pushdown here only ever affects performance, never correctness.
 
 ## Status
 
-**Implemented:** catalog attach/detach with versioning introspection, schema and
-table discovery incl. per-column statistics, table scan (eager + lazy) with
-best-effort projection/filter pushdown, `required_filters` cost-safety enforcement,
-sequential split-scan redemption, transparent multi-branch-table scanning
-(`pl.concat` under the hood), a minimal in-memory/TTL result cache, time-travel
-scans (`AT` clauses), scalar function calls with scoped secrets and per-chunk input
-dedup, streaming and buffered table-in-out functions, and aggregate functions.
-Subprocess, HTTP, and TCP transports.
+**Implemented:**
 
-**Not implemented:** writes, `is_in` filter pushdown, companion-catalog federation,
-per-table time-travel discovery, and the `container://`/`github://`/`launch:`
-transport schemes (a substantially larger effort — a from-scratch Python transport
-layer, not an extension of the existing scheme table).
+- Catalog attach/detach with versioning introspection
+- Schema and table discovery, incl. per-column statistics
+- Table scan (eager + lazy) with best-effort projection/filter pushdown
+- `required_filters` cost-safety enforcement
+- Sequential split-scan redemption
+- Transparent multi-branch-table scanning (`pl.concat` under the hood)
+- A minimal in-memory/TTL result cache
+- Time-travel scans (`AT` clauses)
+- Scalar function calls with scoped secrets and per-chunk input dedup
+- Streaming and buffered table-in-out functions
+- Aggregate functions
+- Subprocess, HTTP, and TCP transports
+
+**Not implemented:**
+
+- Writes
+- `is_in` filter pushdown
+- Companion-catalog federation
+- Per-table time-travel discovery
+- The `container://`/`github://`/`launch:` transport schemes (a substantially
+  larger effort — a from-scratch Python transport layer, not an extension of the
+  existing scheme table)
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture, every non-obvious behavior
 discovered while building this, and an evidence-backed breakdown of every scoped-out
