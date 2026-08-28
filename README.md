@@ -266,14 +266,6 @@ binary path directly if you need something other than the default venv location.
 src/ tests/` mirror what CI runs; `tests/test_docstrings.py` runs `pydoclint` as part
 of the normal `pytest` run rather than as a separate step.
 
-## Learn more
-
-[CLAUDE.md](CLAUDE.md) is this repo's deep-dive doc — full architecture, every
-non-obvious behavior discovered while building this (with the live evidence behind
-each one), and a more detailed, evidence-backed version of the Status section above.
-Not required reading to use the package; it's there for contributors and for anyone
-who wants the "why," not just the "what."
-
 ## License
 
 Apache License, Version 2.0 — see [LICENSE](LICENSE).
