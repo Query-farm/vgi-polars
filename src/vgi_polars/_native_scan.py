@@ -56,16 +56,31 @@ the safety check the way a bug would, `table.py`'s `scan()` refuses outright
 responsible for my own filters here" rather than an accidental full-bucket
 read silently going out over the wire.
 
-**Only `read_parquet` today.** Extending to other native delegation targets
-(`read_csv` -> `pl.scan_csv`, `iceberg_scan` -> a Polars Iceberg reader if
-one's configured, `delta_scan` -> `polars-deltalake`, ...) is a per-function
-mapping to add here as a real need arises — deliberately not solved
-generically; there's no cross-engine standard for "translate any function
-call by name," and guessing wrong would silently misread data.
+**`read_parquet` is confirmed live against a real worker; `read_csv` and
+`iceberg_scan` are not — built conservatively from DuckDB's/Polars' own
+documented signatures, not verified against an actual delegating worker the
+way `read_parquet` was.** `read_csv`'s argument map is deliberately empty:
+DuckDB's `read_csv` has a large, commonly-used named-argument surface
+(`delim`, `header`, `columns`, ...), and guessing which of those a real
+worker sends — and which Polars kwarg each should become — without a live
+example to verify against would risk exactly the silent-misread failure
+mode this module's philosophy refuses to accept. `iceberg_scan` maps only
+`snapshot_from_id` -> `pl.scan_iceberg`'s `snapshot_id` (a safe, unambiguous
+1:1 correspondence; DuckDB's `iceberg_scan` also has
+`snapshot_from_timestamp`/`version`/`allow_moved_paths`, none of which
+`pl.scan_iceberg` has an equivalent for). Any named argument outside a
+target's map raises `VgiPolarsError` rather than silently dropping it —
+extend the map for a given target once a real worker confirms what it
+actually sends, the same way `read_parquet`'s `hive_partitioning` entry was
+added from vgi-python's own `rff_hive` fixture and confirmed again live
+against Overture. Other native delegation targets (`delta_scan` ->
+`polars-deltalake`, ...) aren't mapped at all yet — add here as a real need
+arises.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -75,72 +90,103 @@ from vgi_polars.errors import VgiPolarsError
 if TYPE_CHECKING:
     from vgi.catalog.catalog_interface import ScanFunctionResult
 
-#: Named arguments `_scan_parquet_native` knows how to translate onto
-#: `pl.scan_parquet`'s own keyword parameters. Anything else raises rather
-#: than silently dropping a knob the worker asked for.
-_KNOWN_READ_PARQUET_NAMED_ARGS = {"hive_partitioning"}
+NativeScanHandler = Callable[..., pl.LazyFrame]
 
 
-def _scan_parquet_native(
-    scan_fn: ScanFunctionResult,
+def _make_native_scan_handler(
     *,
-    schema_name: str,
-    table_name: str,
-    storage_options: dict[str, str] | None,
-) -> pl.LazyFrame:
-    """Build a native `pl.scan_parquet(...)` from a `read_parquet`-delegating `ScanFunctionResult`.
+    duckdb_function_name: str,
+    reader: Callable[..., pl.LazyFrame],
+    reader_call_name: str,
+    arg_name_map: dict[str, str],
+) -> NativeScanHandler:
+    """Build a `NATIVE_SCAN_HANDLERS` entry: wire-arg validation + translation, one native reader.
 
     Args:
-        scan_fn: The worker's `table_scan_function_get` response, with
-            `function_name == "read_parquet"`.
-        schema_name: The table's schema — only used to name it in errors.
-        table_name: The table's name — only used to name it in errors.
-        storage_options: Passed straight through to `pl.scan_parquet` (e.g.
-            `{"aws_region": "us-west-2", "skip_signature": "true"}` for a
-            public, unauthenticated S3 bucket) — see module docstring's
-            "out-of-band settings" section for why this can't be inferred.
+        duckdb_function_name: The `ScanFunctionResult.function_name` this
+            handler answers for (e.g. `"read_parquet"`) — used only to name
+            it in error messages.
+        reader: The Polars-native `pl.scan_*` function to call.
+        reader_call_name: `reader`'s name, for error messages (e.g.
+            `"pl.scan_parquet"`).
+        arg_name_map: `{wire named-argument name: reader's keyword parameter
+            name}` for every named argument this handler knows how to
+            translate. A wire named argument outside this map raises rather
+            than being silently dropped — see module docstring.
 
     Returns:
-        A `pl.LazyFrame` reading the delegated path directly — no VGI
-        round-trip for the data.
-
-    Raises:
-        VgiPolarsError: If the `ScanFunctionResult` doesn't carry a usable
-            path (arg 0, a string), or carries a named argument this module
-            doesn't know how to translate.
+        A handler function matching `NATIVE_SCAN_HANDLERS`'s call
+        signature (`scan_fn`, `schema_name`, `table_name`, `storage_options`).
 
     """
-    if not scan_fn.positional_arguments:
-        raise VgiPolarsError(
-            f"{schema_name}.{table_name}: worker delegated to read_parquet with no positional "
-            "arguments (expected the file/glob path as argument 0)"
-        )
-    path = scan_fn.positional_arguments[0].as_py()
-    if not isinstance(path, str):
-        raise VgiPolarsError(
-            f"{schema_name}.{table_name}: read_parquet's first argument is a "
-            f"{type(path).__name__}, expected a path/glob string"
-        )
+    known_wire_names = set(arg_name_map)
 
-    kwargs: dict[str, Any] = {}
-    unknown = sorted(set(scan_fn.named_arguments or {}) - _KNOWN_READ_PARQUET_NAMED_ARGS)
-    if unknown:
-        raise VgiPolarsError(
-            f"{schema_name}.{table_name}: worker's read_parquet delegation passed named "
-            f"argument(s) {unknown} vgi-polars doesn't know how to translate to pl.scan_parquet "
-            f"(known: {sorted(_KNOWN_READ_PARQUET_NAMED_ARGS)})"
-        )
-    for name in _KNOWN_READ_PARQUET_NAMED_ARGS:
-        value = (scan_fn.named_arguments or {}).get(name)
-        if value is not None:
-            kwargs[name] = value.as_py()
+    def handler(
+        scan_fn: ScanFunctionResult,
+        *,
+        schema_name: str,
+        table_name: str,
+        storage_options: dict[str, str] | None,
+    ) -> pl.LazyFrame:
+        if not scan_fn.positional_arguments:
+            raise VgiPolarsError(
+                f"{schema_name}.{table_name}: worker delegated to {duckdb_function_name} with no "
+                "positional arguments (expected the file/glob path as argument 0)"
+            )
+        path = scan_fn.positional_arguments[0].as_py()
+        if not isinstance(path, str):
+            raise VgiPolarsError(
+                f"{schema_name}.{table_name}: {duckdb_function_name}'s first argument is a "
+                f"{type(path).__name__}, expected a path/glob string"
+            )
 
-    return pl.scan_parquet(path, storage_options=storage_options, **kwargs)
+        kwargs: dict[str, Any] = {}
+        unknown = sorted(set(scan_fn.named_arguments or {}) - known_wire_names)
+        if unknown:
+            raise VgiPolarsError(
+                f"{schema_name}.{table_name}: worker's {duckdb_function_name} delegation passed "
+                f"named argument(s) {unknown} vgi-polars doesn't know how to translate to "
+                f"{reader_call_name} (known: {sorted(known_wire_names)})"
+            )
+        for wire_name, reader_kwarg in arg_name_map.items():
+            value = (scan_fn.named_arguments or {}).get(wire_name)
+            if value is not None:
+                kwargs[reader_kwarg] = value.as_py()
 
+        return reader(path, storage_options=storage_options, **kwargs)
+
+    return handler
+
+
+#: Bound to a module-level name (not just an entry in `NATIVE_SCAN_HANDLERS`)
+#: because `tests/test_native_scan.py` imports it directly for its pure-unit
+#: test slice (no worker involved).
+_scan_parquet_native = _make_native_scan_handler(
+    duckdb_function_name="read_parquet",
+    reader=pl.scan_parquet,
+    reader_call_name="pl.scan_parquet",
+    arg_name_map={"hive_partitioning": "hive_partitioning"},
+)
+
+_scan_csv_native = _make_native_scan_handler(
+    duckdb_function_name="read_csv",
+    reader=pl.scan_csv,
+    reader_call_name="pl.scan_csv",
+    arg_name_map={},
+)
+
+_scan_iceberg_native = _make_native_scan_handler(
+    duckdb_function_name="iceberg_scan",
+    reader=pl.scan_iceberg,
+    reader_call_name="pl.scan_iceberg",
+    arg_name_map={"snapshot_from_id": "snapshot_id"},
+)
 
 #: `ScanFunctionResult.function_name` -> the Polars-native builder that
 #: satisfies it directly, bypassing `register_io_source`/`Client.
 #: table_function` entirely. See module docstring.
-NATIVE_SCAN_HANDLERS = {
+NATIVE_SCAN_HANDLERS: dict[str, NativeScanHandler] = {
     "read_parquet": _scan_parquet_native,
+    "read_csv": _scan_csv_native,
+    "iceberg_scan": _scan_iceberg_native,
 }

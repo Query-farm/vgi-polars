@@ -296,8 +296,10 @@ pass didn't reach (catalog-table branches have no established "attach
 another catalog" concept in Polars at all; format branches need a
 `format_name` → reader resolver like the C++ extension's own).
 
-**Native scan-function delegation — implemented for `read_parquet`**
-(`_native_scan.py`). `ScanFunctionResult.function_name` can name a reader the
+**Native scan-function delegation — implemented for `read_parquet`,
+`read_csv`, `iceberg_scan`** (`_native_scan.py`, all built by the same
+`_make_native_scan_handler` factory: validate the positional path, translate
+a known-named-argument map, raise on anything outside it). `ScanFunctionResult.function_name` can name a reader the
 *calling engine* should run itself rather than a VGI-hosted function (its own
 docstring: "read_parquet, iceberg_scan, or a custom VGI table function") —
 the DuckDB C++ extension resolves this by checking its own function catalog
@@ -320,10 +322,17 @@ cost-safety enforcement has no equivalent hook for a bare `LazyFrame`
 returned immediately — no callback with the resolved predicate the way
 `register_io_source` gets one at collect time — so `scan()` refuses outright
 when a natively-delegated table declares `required_filters`, unless the
-caller explicitly opts in). Scoped to single-branch tables and `read_parquet`
-only; the analogous multi-branch "format branch" case above stays
-unimplemented, and other native targets (`read_csv`, `iceberg_scan`, ...) are
-a per-function mapping to add as a real need arises, not solved generically.
+caller explicitly opts in). Scoped to single-branch tables. Only
+`read_parquet` is confirmed against a real delegating worker (Overture);
+`read_csv`'s argument map is deliberately empty (DuckDB's `read_csv` has a
+large named-arg surface with no confirmed real-world mapping yet — guessing
+wrong would silently misread data) and `iceberg_scan` maps only
+`snapshot_from_id` -> `pl.scan_iceberg`'s `snapshot_id` (the one safe,
+unambiguous correspondence; `pl.scan_iceberg` needs `pyiceberg` installed for
+non-trivial reads, an environment concern this module can't paper over). The
+analogous multi-branch "format branch" case above stays unimplemented, and
+further native targets (`delta_scan`, ...) are a per-function mapping to add
+as a real need arises, not solved generically.
 
 **Table-function result cache — implemented, minimal slice.** An in-memory,
 TTL-only, producer-mode(whole-scan)-only cache (`_result_cache.py`):  when a

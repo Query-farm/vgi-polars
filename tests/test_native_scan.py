@@ -23,6 +23,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import pyarrow as pa
@@ -31,7 +32,7 @@ import pytest
 from vgi.catalog.catalog_interface import ScanFunctionResult
 
 import vgi_polars as vp
-from vgi_polars._native_scan import _scan_parquet_native
+from vgi_polars._native_scan import NATIVE_SCAN_HANDLERS, _make_native_scan_handler, _scan_parquet_native
 from vgi_polars.errors import VgiPolarsError
 
 
@@ -85,6 +86,94 @@ class TestScanParquetNativeUnit:
         )
         with pytest.raises(VgiPolarsError, match="some_unknown_option"):
             _scan_parquet_native(scan_fn, schema_name="s", table_name="t", storage_options=None)
+
+
+class TestScanCsvNativeUnit:
+    """`read_csv` -> `pl.scan_csv` -- no worker, real local CSV, no named-arg mapping yet."""
+
+    def test_builds_a_working_scan(self, tmp_path: Path) -> None:
+        path = tmp_path / "data.csv"
+        path.write_text("a,b\n1,x\n2,y\n")
+
+        scan_fn = ScanFunctionResult(
+            function_name="read_csv", positional_arguments=[pa.scalar(str(path))], named_arguments={}
+        )
+        lf = NATIVE_SCAN_HANDLERS["read_csv"](scan_fn, schema_name="s", table_name="t", storage_options=None)
+        out = lf.collect()
+        assert out["a"].to_list() == [1, 2]
+        assert out["b"].to_list() == ["x", "y"]
+
+    def test_no_positional_arguments_raises(self) -> None:
+        scan_fn = ScanFunctionResult(function_name="read_csv", positional_arguments=[], named_arguments={})
+        with pytest.raises(VgiPolarsError, match="no positional arguments"):
+            NATIVE_SCAN_HANDLERS["read_csv"](scan_fn, schema_name="s", table_name="t", storage_options=None)
+
+    def test_any_named_argument_raises(self) -> None:
+        """No named-arg mapping is confirmed yet for read_csv -- every one must raise, not silently drop."""
+        scan_fn = ScanFunctionResult(
+            function_name="read_csv",
+            positional_arguments=[pa.scalar("/tmp/whatever.csv")],
+            named_arguments={"delim": pa.scalar(";")},
+        )
+        with pytest.raises(VgiPolarsError, match="delim"):
+            NATIVE_SCAN_HANDLERS["read_csv"](scan_fn, schema_name="s", table_name="t", storage_options=None)
+
+
+class TestScanIcebergNativeUnit:
+    """`iceberg_scan` -> `pl.scan_iceberg`'s translation logic, in isolation.
+
+    Rebuilds a handler via `_make_native_scan_handler` with a fake `reader`
+    (the same `arg_name_map` the real `NATIVE_SCAN_HANDLERS["iceberg_scan"]`
+    uses), rather than calling the real `pl.scan_iceberg`: this repo doesn't
+    depend on `pyiceberg`, and monkeypatching `pl.scan_iceberg` wouldn't
+    reach it anyway -- the real handler already closed over the function
+    object at import time, not a dynamic `pl.scan_iceberg` lookup. Standing
+    up a real Iceberg table just to prove `snapshot_from_id` becomes
+    `snapshot_id` would test Polars' Iceberg reader, not this module's
+    translation logic, which is what's actually under test here.
+    """
+
+    def _fake_handler(self, captured: dict[str, Any]) -> Any:
+        def fake_scan_iceberg(source: str, **kwargs: Any) -> pl.LazyFrame:
+            captured["source"] = source
+            captured.update(kwargs)
+            return pl.LazyFrame({"x": [1]})
+
+        return _make_native_scan_handler(
+            duckdb_function_name="iceberg_scan",
+            reader=fake_scan_iceberg,
+            reader_call_name="pl.scan_iceberg",
+            arg_name_map={"snapshot_from_id": "snapshot_id"},
+        )
+
+    def test_path_and_snapshot_id_are_translated(self) -> None:
+        captured: dict[str, Any] = {}
+        handler = self._fake_handler(captured)
+
+        scan_fn = ScanFunctionResult(
+            function_name="iceberg_scan",
+            positional_arguments=[pa.scalar("s3://bucket/warehouse/table")],
+            named_arguments={"snapshot_from_id": pa.scalar(42)},
+        )
+        handler(scan_fn, schema_name="s", table_name="t", storage_options=None)
+
+        assert captured["source"] == "s3://bucket/warehouse/table"
+        assert captured["snapshot_id"] == 42
+        assert "snapshot_from_id" not in captured
+
+    def test_unmapped_duckdb_named_argument_raises(self) -> None:
+        """`allow_moved_paths` has no pl.scan_iceberg equivalent -- must raise, not drop.
+
+        Uses the real `NATIVE_SCAN_HANDLERS["iceberg_scan"]` -- this path
+        raises before ever calling the reader, so it needs no fake.
+        """
+        scan_fn = ScanFunctionResult(
+            function_name="iceberg_scan",
+            positional_arguments=[pa.scalar("s3://bucket/warehouse/table")],
+            named_arguments={"allow_moved_paths": pa.scalar(True)},
+        )
+        with pytest.raises(VgiPolarsError, match="allow_moved_paths"):
+            NATIVE_SCAN_HANDLERS["iceberg_scan"](scan_fn, schema_name="s", table_name="t", storage_options=None)
 
 
 class TestRffParquetIntegration:
