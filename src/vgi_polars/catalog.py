@@ -331,6 +331,11 @@ def attach(
     data_version_spec: str | None = None,
     implementation_version: str | None = None,
     bearer_token: str | None = None,
+    oauth: bool = False,
+    oauth_refresh_token: str | None = None,
+    oauth_flow: Literal["auto", "device_code", "pkce"] = "auto",
+    oauth_timeout_seconds: float = 120.0,
+    oauth_prompt: Literal["none", "login", "select_account", "consent"] = "none",
     worker_limit: int | None = None,
     **client_kwargs: Any,
 ) -> VgiCatalog:
@@ -352,7 +357,28 @@ def attach(
         options: Catalog-specific ATTACH options.
         data_version_spec: Semver constraint for the catalog's data version.
         implementation_version: Semver constraint for the worker's implementation.
-        bearer_token: Static bearer token, HTTP transport only.
+        bearer_token: Static bearer token, HTTP transport only. Mutually
+            exclusive with `oauth`/`oauth_refresh_token` (enforced by `Client`).
+        oauth: HTTP transport only. When `True`, obtain and refresh bearer
+            tokens automatically via OAuth (device-code flow today — PKCE is
+            not yet implemented) whenever the worker answers 401 with an
+            RFC 9728 challenge. Implied by passing `oauth_refresh_token`. The
+            first call blocks and prints a "Visit: ... Enter code: ..."
+            prompt until login completes; later calls reuse the cached token
+            and refresh it silently. See `vgi.client.Client`'s own docs for
+            the full mechanism, and `catalog.client.oauth_identity()` to read
+            back the signed-in identity once authenticated.
+        oauth_refresh_token: HTTP transport only. Pre-obtained refresh token,
+            seeded so the first request can silently refresh instead of
+            running an interactive login. Implies `oauth=True`.
+        oauth_flow: HTTP transport only, OAuth only. `"auto"` (default) picks
+            device-code when the server offers it; `"device_code"` forces it;
+            `"pkce"` is not yet implemented and raises `NotImplementedError`
+            when actually needed.
+        oauth_timeout_seconds: HTTP transport only, OAuth only. How long an
+            interactive login may take before giving up.
+        oauth_prompt: HTTP transport only, OAuth only. Reserved for the PKCE
+            flow (not yet implemented); has no effect on device-code logins.
         worker_limit: Max concurrent workers, subprocess transport only.
         **client_kwargs: Passed through to `Client(...)` / `Client.from_http(...)`
             / `Client.from_tcp(...)`.
@@ -376,7 +402,16 @@ def attach(
         if resolved_transport == "subprocess":
             return Client(location, worker_limit=worker_limit, **client_kwargs)
         if resolved_transport == "http":
-            return Client.from_http(location, bearer_token=bearer_token, **client_kwargs)
+            return Client.from_http(
+                location,
+                bearer_token=bearer_token,
+                oauth=oauth,
+                oauth_refresh_token=oauth_refresh_token,
+                oauth_flow=oauth_flow,
+                oauth_timeout_seconds=oauth_timeout_seconds,
+                oauth_prompt=oauth_prompt,
+                **client_kwargs,
+            )
         if resolved_transport == "tcp":
             # Strip the tcp:// prefix if auto-detected or passed explicitly with it.
             host_port = location.removeprefix("tcp://")
