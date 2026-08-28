@@ -30,7 +30,12 @@ classifiers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "polars>=1.31",
+    # 1.41.1, not the previous 1.31 floor: DataFrame.gather() (used in
+    # _row_transform.py) was only added in Polars ~1.41 -- 1.41.0 itself was
+    # yanked from PyPI, so 1.41.1 is the actual earliest usable version.
+    # Confirmed live (a real Colab install pinned in [1.31, 1.41) hit
+    # AttributeError: 'DataFrame' object has no attribute 'gather').
+    "polars>=1.41.1",
     "pyarrow>=17",
     "vgi-python>=0.29.0",
 ]

@@ -64,6 +64,10 @@ relied on for the lower bound. `_validate_parent_row` below runs an explicit
 `< 0` check on every composed outer-row index before `.gather()` is ever
 called — never rely on `.gather()` to catch a negative index.
 
+`DataFrame.gather()` needs Polars >= 1.41.1 (confirmed by bisecting PyPI
+releases — 1.41.0 itself was yanked; 1.40.1 predates the method, 1.41.1 has
+it), hence this package's `polars>=1.41.1` floor.
+
 **Outer-column policy: gather every column of `lf`, never exclude columns
 "consumed" as args.** This matches what a real `FROM t, f(t.x)` correlated
 join does (`t.x` stays present in the result) and avoids a fragile

@@ -924,7 +924,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "polars", specifier = ">=1.31" },
+    { name = "polars", specifier = ">=1.41.1" },
     { name = "pyarrow", specifier = ">=17" },
     { name = "vgi-python", editable = "../vgi-python" },
     { name = "vgi-python", extras = ["http"], marker = "extra == 'http'", editable = "../vgi-python" },
