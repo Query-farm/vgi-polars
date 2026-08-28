@@ -105,7 +105,7 @@ shape: (8, 3)
 ╞═════════════════════════════╪═════╪═════════════════════════════════╡
 │ 2026-08-14 21:58:21.564 UTC ┆ 7.7 ┆ 68 km NNW of Ende, Indonesia    │
 │ 2026-08-10 12:34:28.125 UTC ┆ 7.4 ┆ 5 km S of San José del Palmar,… │
-│ …                            ┆ …   ┆ …                               │
+│ …                           ┆ …   ┆ …                               │
 └─────────────────────────────┴─────┴─────────────────────────────────┘
 ```
 
@@ -126,6 +126,8 @@ callable either as a bare literal call or joined against an existing
 shapes chain together below: a literal `geocoding` call resolves a place name
 to coordinates, then `forecast_hourly` is called *against that result*,
 correlating each output row back to the place that produced it.
+
+Try it live: [Colab notebook](https://colab.research.google.com/drive/1eGmuXmpaLQ4MfStPTWlDXabfX5aAZf8a?usp=sharing).
 
 ```python
 import polars as pl
