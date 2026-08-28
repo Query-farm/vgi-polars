@@ -25,6 +25,19 @@ idiom for a multi-column `map_batches`), unnested back into per-argument
 Arrow arrays cast to the function's declared types, and exchanged 1:1 through
 `Client.scalar_function`.
 
+**`ANY`-typed (polymorphic) arguments** are the one declared-type exception.
+A worker function that accepts more than one concrete type for a parameter
+(e.g. `vgi-ical`'s `is_valid_ical(input)`, documented as "a `VARCHAR` file
+path, or a `BLOB` of bytes") advertises that argument's declared Arrow type
+as `null` — a placeholder, not a real type to cast to (see
+`_arguments.is_any_type_field`). Casting real data to `null` is nonsensical
+and pyarrow correctly refuses it (`ArrowNotImplementedError: Unsupported
+cast from ... to null`), which is what calling such a function used to raise
+before this was handled — confirmed live against `vgi-ical`. `_resolve_array_field`
+below sends the column's own natural Arrow type for exactly these fields,
+skipping the cast, while every ordinarily-typed field still casts to its
+declared type as before.
+
 **Scoped secrets.** The returned callable takes an optional keyword-only
 `secrets: dict[str, Any] | None` (`{name: value}`, value may be a nested dict
 for a struct-typed secret), threaded straight through to
@@ -67,7 +80,7 @@ import pyarrow as pa
 from vgi.arguments import Arguments
 from vgi.catalog.catalog_interface import FunctionInfo, FunctionStability, SchemaObjectType
 
-from vgi_polars._arguments import is_const_field, to_scalar
+from vgi_polars._arguments import is_any_type_field, is_const_field, to_scalar
 from vgi_polars._polars_compat import arrow_to_df, arrow_to_series
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
@@ -76,6 +89,29 @@ if TYPE_CHECKING:
 
 #: The callable `VgiCatalog.scalar_function` returns — see `make_scalar_function`.
 ScalarFunctionCall = Callable[..., pl.Expr]
+
+
+def _resolve_array_field(array: pa.Array[Any], declared_field: pa.Field[Any]) -> tuple[pa.Array[Any], pa.Field[Any]]:
+    """Cast `array` to `declared_field`'s type -- unless the field is `ANY`-typed.
+
+    An `ANY`-typed field's *declared* type is always `pa.null()`, a placeholder
+    (see `_arguments.is_any_type_field`) -- there is no real type to cast to, so
+    the array's own natural type is sent as-is, and the returned field carries
+    that same resolved type instead of the placeholder.
+
+    Args:
+        array: The column's data, already converted to Arrow.
+        declared_field: The function's declared schema field for this argument.
+
+    Returns:
+        `(array, field)` ready to feed into `pa.RecordBatch.from_arrays` --
+        `array` cast to `field.type` when the declared type was concrete;
+        `array` unchanged, `field` retyped to `array.type`, when it was `ANY`.
+
+    """
+    if is_any_type_field(declared_field):
+        return array, declared_field.with_type(array.type)
+    return array.cast(declared_field.type), declared_field
 
 
 def _dedup_positions(batch: pa.RecordBatch) -> tuple[list[int], list[int]] | None:
@@ -166,8 +202,13 @@ def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str) -> Sc
 
         def _apply(struct_series: pl.Series) -> pl.Series:
             cols = struct_series.struct.unnest()
-            arrays = [cols.to_series(i).to_arrow().cast(array_schema.field(i).type) for i in range(len(array_fields))]
-            batch = pa.RecordBatch.from_arrays(arrays, schema=array_schema)
+            resolved = [
+                _resolve_array_field(cols.to_series(i).to_arrow(), array_schema.field(i))
+                for i in range(len(array_fields))
+            ]
+            batch = pa.RecordBatch.from_arrays(
+                [array for array, _ in resolved], schema=pa.schema([field for _, field in resolved])
+            )
 
             inverse: list[int] | None = None
             if dedup_safe:

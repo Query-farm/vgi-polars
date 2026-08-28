@@ -24,11 +24,35 @@ from vgi.arguments import Arguments
 VGI_CONST_KEY = b"vgi_const"
 VGI_CONST_TRUE = b"true"
 
+#: Field metadata an `AnyArrow`-typed (polymorphic) argument carries on the
+#: wire — mirrors `VGI_TYPE_KEY`/`VGI_TYPE_ANY` in vgi-python's
+#: `vgi/argument_spec.py` (duplicated here rather than imported, matching
+#: `VGI_CONST_KEY` above: that module is vgi-python-internal, not a stable
+#: public surface). A declared field this metadata is set on always carries
+#: `pa.null()` as its *declared* Arrow type — a placeholder, since the whole
+#: point is that the actual per-call type isn't fixed — so a caller must
+#: never cast real data to it; see `is_any_type_field` and `_scalar.py`'s
+#: `_resolve_array_field`. Confirmed live against `vgi-ical`'s
+#: `is_valid_ical(input)`, whose declared `input` field is exactly
+#: `null` + `{vgi_type: any}` (its doc: "a VARCHAR file path ... or a BLOB").
+VGI_TYPE_KEY = b"vgi_type"
+VGI_TYPE_ANY = b"any"
+
 
 def is_const_field(field: pa.Field[Any]) -> bool:
     """Whether a declared argument field is a bind-time `ConstParam`."""
     md = field.metadata or {}
     return md.get(VGI_CONST_KEY) == VGI_CONST_TRUE
+
+
+def is_any_type_field(field: pa.Field[Any]) -> bool:
+    """Whether a declared argument field is polymorphic (`AnyArrow`), accepting any Arrow type.
+
+    Its *declared* type is always the `pa.null()` placeholder — never a type
+    to actually cast real data to.
+    """
+    md = field.metadata or {}
+    return md.get(VGI_TYPE_KEY) == VGI_TYPE_ANY
 
 
 def to_scalar(value: Any, arrow_type: pa.DataType | None = None) -> pa.Scalar[Any]:
