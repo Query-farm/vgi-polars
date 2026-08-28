@@ -236,7 +236,12 @@ class VgiTable:
             self._scan_branches = list(result.branches)
         return self._scan_branches
 
-    def scan(self) -> pl.LazyFrame:
+    def scan(
+        self,
+        *,
+        storage_options: dict[str, str] | None = None,
+        acknowledge_required_filters: bool = False,
+    ) -> pl.LazyFrame:
         """A lazy, pushdown-aware scan of this table.
 
         Transparently handles a multi-branch table (`pl.concat` of one scan
@@ -251,6 +256,20 @@ class VgiTable:
         only for a genuinely multi-branch table — the same silent limitation
         this feature fixes, but no worse than before this method existed,
         and never an `AttributeError`).
+
+        **Native scan-function delegation** (`_native_scan.py`): when the
+        resolved scan function names something Polars can satisfy directly
+        (currently just `read_parquet` -> `pl.scan_parquet`) rather than a
+        VGI-hosted function, this returns that native `LazyFrame` straight
+        away — no `register_io_source`, no worker round-trip for the data at
+        all. `storage_options` is a plain passthrough for that path (cloud
+        credentials/region are genuinely out-of-band on the wire, the same
+        way DuckDB's own reference worker needs a separate `SET
+        s3_region=...`). If the table also declares `required_filters`, this
+        raises `VgiPolarsError` unless `acknowledge_required_filters=True` —
+        the io_source path's cost-safety check has no equivalent hook here
+        (see `_native_scan.py`'s module docstring for why), so refusing by
+        default beats silently dropping a real safety guard.
         """
         if hasattr(self._catalog.client, "table_scan_branches_get"):
             branches = self._scan_branches_get()
@@ -259,6 +278,28 @@ class VgiTable:
 
                 return scan_multi_branch(self, branches)
 
+        from vgi_polars._native_scan import NATIVE_SCAN_HANDLERS
+
+        scan_fn = self._scan_function_get()
+        native_handler = NATIVE_SCAN_HANDLERS.get(scan_fn.function_name)
+        if native_handler is not None:
+            required = self.required_filters()
+            if required and not acknowledge_required_filters:
+                raise VgiPolarsError(
+                    f"{self.schema_name}.{self.name}: natively delegates to "
+                    f"{scan_fn.function_name!r} and declares required_filters {required} that "
+                    "vgi-polars cannot enforce for a native scan (no hook to inspect the "
+                    "eventual predicate before .collect()). Pass scan(acknowledge_required_"
+                    "filters=True) once you've applied the equivalent filter(s) yourself, or "
+                    "you WILL trigger a full, possibly enormous, unfiltered remote read."
+                )
+            return native_handler(
+                scan_fn,
+                schema_name=self.schema_name,
+                table_name=self.name,
+                storage_options=storage_options,
+            )
+
         from polars.io.plugins import register_io_source
 
         from vgi_polars._source import make_io_source
@@ -266,9 +307,16 @@ class VgiTable:
         arrow_schema = self.arrow_schema
         return register_io_source(make_io_source(self, arrow_schema), schema=self.schema)
 
-    def read(self) -> pl.DataFrame:
-        """An eager, full scan of this table."""
-        return self.scan().collect()
+    def read(
+        self,
+        *,
+        storage_options: dict[str, str] | None = None,
+        acknowledge_required_filters: bool = False,
+    ) -> pl.DataFrame:
+        """An eager, full scan of this table. See `scan()` for the parameters."""
+        return self.scan(
+            storage_options=storage_options, acknowledge_required_filters=acknowledge_required_filters
+        ).collect()
 
     def statistics(self) -> list[ColumnStatistics]:
         """Per-column statistics (min/max/null presence/distinct count/...), if the worker advertises them.
