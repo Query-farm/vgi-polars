@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://raw.githubusercontent.com/Query-farm/vgi-polars/main/docs/vgi-logo.png?v=1" alt="VGI logo" width="260">
   &nbsp;&nbsp;+&nbsp;&nbsp;
-  <img src="https://raw.githubusercontent.com/Query-farm/vgi-polars/main/docs/polars-logo.svg?v=1" alt="Polars logo" width="130">
+  <img src="https://raw.githubusercontent.com/Query-farm/vgi-polars/main/docs/polars-logo.svg?v=1" alt="Polars logo" width="180">
 </p>
 
 # vgi-polars
