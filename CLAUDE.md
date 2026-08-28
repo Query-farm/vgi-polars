@@ -180,8 +180,9 @@ functions via an eager `pl.DataFrame` bridge incl. `ConstParam` args
 correlated/column shape (`map_batches` + `vgi_rpc.parent_row` provenance
 decoding) and the bare literal-call shape (`pl.defer`) — via
 `cat.row_transform_function(schema, name)` (`_row_transform.py`, see the
-dedicated paragraph below for the design), thread-safe exchange-mode calls
-(see "Thread safety" above),
+dedicated paragraph below for the design), native scan-function delegation
+for `read_parquet` (`_native_scan.py`, see its own paragraph below),
+thread-safe exchange-mode calls (see "Thread safety" above),
 HTTP bearer auth, protocol-robustness (bad-protocol-version/bad-enum-wire/
 mid-stream error) handling, per-chunk scalar input dedup (`dedup=True` default
 on every scalar-function callable, the client-side mirror of the C++
@@ -294,6 +295,35 @@ declarative `read_parquet`/`read_csv`-style reader) raises a clear
 pass didn't reach (catalog-table branches have no established "attach
 another catalog" concept in Polars at all; format branches need a
 `format_name` → reader resolver like the C++ extension's own).
+
+**Native scan-function delegation — implemented for `read_parquet`**
+(`_native_scan.py`). `ScanFunctionResult.function_name` can name a reader the
+*calling engine* should run itself rather than a VGI-hosted function (its own
+docstring: "read_parquet, iceberg_scan, or a custom VGI table function") —
+the DuckDB C++ extension resolves this by checking its own function catalog
+before ever treating it as an RPC target. Found genuinely blocking, not
+theoretical: a real public worker
+([vgi-overture-maps](https://github.com/Query-farm/vgi-overture-maps-typescript))
+ships no data at all — every table natively delegates to `read_parquet`
+against Overture's public S3 GeoParquet — and `Client.table_function
+(function_name="read_parquet", ...)` against it raised
+`FunctionNotFoundError` (its `FunctionRegistry` is deliberately empty).
+`VgiTable.scan()` now resolves this before ever reaching
+`register_io_source`: `read_parquet` -> `pl.scan_parquet`, using
+`ScanFunctionResult`'s positional/named arguments, bypassing the worker
+entirely for the actual data (real Polars-native pushdown, not a hand-rolled
+approximation). Two new `scan()` parameters: `storage_options` (a plain
+passthrough — cloud credentials/region are genuinely out-of-band on VGI's
+wire, the same way DuckDB's own reference worker needs a separate `SET
+s3_region=...`) and `acknowledge_required_filters` (required-filters
+cost-safety enforcement has no equivalent hook for a bare `LazyFrame`
+returned immediately — no callback with the resolved predicate the way
+`register_io_source` gets one at collect time — so `scan()` refuses outright
+when a natively-delegated table declares `required_filters`, unless the
+caller explicitly opts in). Scoped to single-branch tables and `read_parquet`
+only; the analogous multi-branch "format branch" case above stays
+unimplemented, and other native targets (`read_csv`, `iceberg_scan`, ...) are
+a per-function mapping to add as a real need arises, not solved generically.
 
 **Table-function result cache — implemented, minimal slice.** An in-memory,
 TTL-only, producer-mode(whole-scan)-only cache (`_result_cache.py`):  when a

@@ -223,6 +223,12 @@ than strictly necessary — never a correctness one.
   LATERAL geocode(t.place)` equivalent: `geocode(lf, pl.col("place"))`) and the bare
   literal-call shape (`geocode(None, 'some place')`)
 - Aggregate functions
+- Native scan-function delegation (`read_parquet` -> `pl.scan_parquet`) — a worker
+  that ships no data of its own and instead tells the caller to run a native reader
+  itself (VGI's `ScanFunctionResult` mechanism; see e.g.
+  [vgi-overture-maps](https://github.com/Query-farm/vgi-overture-maps-typescript),
+  a pure-metadata Overture Maps catalog). Real Polars-native pushdown (row-group
+  pruning, cloud range reads), not anything vgi-polars hand-rolls
 - Subprocess, HTTP, and TCP transports
 
 **Not implemented:**
