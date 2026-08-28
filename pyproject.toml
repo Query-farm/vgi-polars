@@ -36,7 +36,11 @@ dependencies = [
     # Confirmed live (a real Colab install pinned in [1.31, 1.41) hit
     # AttributeError: 'DataFrame' object has no attribute 'gather').
     "polars>=1.41.1",
-    "pyarrow>=17",
+    # 18.0.0, not 17: pyarrow 17.0.0 ships no cp313 wheel at all (only up to
+    # cp312), so "pyarrow>=17" was unsatisfiable against this package's own
+    # requires-python = ">=3.13" -- found via the same minimum-versions
+    # resolution check that caught the polars floor above.
+    "pyarrow>=18",
     "vgi-python>=0.29.0",
 ]
 

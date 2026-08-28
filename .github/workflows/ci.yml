@@ -112,3 +112,73 @@ jobs:
         with:
           name: coverage-xml
           path: vgi-polars/coverage.xml
+
+  test-min-versions:
+    name: Test against declared minimum dependency versions
+    runs-on: ubuntu-latest
+    # `uv sync` (the `test` job above) always resolves to the NEWEST version
+    # satisfying each dependency constraint, never the oldest -- so a
+    # declared floor like "polars>=1.31" was never actually exercised at
+    # 1.31, only ever tested against whatever was newest at CI-run time.
+    # That gap is exactly where a real bug shipped silently: _row_transform.py
+    # used DataFrame.gather() (added in Polars ~1.41) while the floor still
+    # claimed 1.31 was enough, and pyarrow>=17 turned out to have no cp313
+    # wheel at all against this package's own requires-python>=3.13 -- both
+    # found by a user hitting a real Colab install sitting in that untested
+    # gap, not by this CI. `--resolution lowest-direct` closes it: install
+    # this package (+ its `http` extra) resolving every DIRECT dependency to
+    # its lowest allowed version (transitive deps stay at a normal/compatible
+    # resolution, so this isn't "oldest possible everything," just "the
+    # floor we actually claim to support"), then run the real test suite
+    # against that environment. A regression here means the declared minimum
+    # in pyproject.toml is a lie, not that the code has a logic bug --
+    # bumping the floor is usually the fix, not chasing compatibility shims.
+    steps:
+      - name: Checkout vgi-polars
+        uses: actions/checkout@v7
+        with:
+          path: vgi-polars
+
+      - name: Checkout vgi-python (sibling)
+        uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-python
+          ref: ${{ github.event.inputs.vgi_python_ref || env.VGI_PYTHON_REF }}
+          path: vgi-python
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Sync vgi-python
+        working-directory: vgi-python
+        run: uv sync --extra http
+
+      # A plain `uv venv` + `uv pip install -e .[http]`, NOT `uv sync`: the
+      # project's `dev` dependency group (mypy/ruff/pytest/...) has no lower
+      # bounds at all -- it's tooling, never something an end user installs
+      # via `pip install vgi-polars` -- so resolving IT to "lowest" would
+      # pick genuinely ancient/broken releases (confirmed: mypy would
+      # resolve to a Python 2-era package). Scoping to `-e .[http]` (the
+      # package's own install requirements) is what makes "lowest-direct"
+      # mean "the floor we actually publish," not "the floor of everything
+      # in the repo, including dev tools nobody bounded on purpose."
+      - name: Create minimum-versions venv
+        working-directory: vgi-polars
+        run: uv venv .venv-min --python 3.13
+
+      - name: Install vgi-polars at its declared minimum versions
+        working-directory: vgi-polars
+        run: uv pip install --python .venv-min/bin/python --resolution lowest-direct -e ".[http]"
+
+      - name: Install test tooling (unbounded is fine -- not part of the published floor)
+        working-directory: vgi-polars
+        run: uv pip install --python .venv-min/bin/python pytest pytest-cov
+
+      - name: Run tests against the minimum-versions environment
+        working-directory: vgi-polars
+        env:
+          VGI_PYTHON: ${{ github.workspace }}/vgi-python
+        run: .venv-min/bin/python -m pytest -v
