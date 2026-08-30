@@ -1,6 +1,6 @@
 [project]
 name = "vgi-polars"
-version = "0.7.0"
+version = "0.8.0"
 description = "Polars connector for VGI (Vector Gateway Interface) — scan VGI catalog tables and call VGI functions from Polars"
 readme = "README.md"
 keywords = [
@@ -49,6 +49,7 @@ dependencies = [
 
 [project.optional-dependencies]
 http = ["vgi-python[http]"]
+launch = ["vgi-python[launch]"]
 
 [project.urls]
 Homepage = "https://github.com/Query-farm/vgi-polars"
@@ -60,6 +61,8 @@ Issues = "https://github.com/Query-farm/vgi-polars/issues"
 # Includes the `http` extra so `uv sync` (no --extra needed) can run the
 # HTTP-transport tests locally — vgi.client.Client's HTTP path imports
 # vgi_rpc.http, which needs falcon (only pulled in via vgi-python[http]).
+# Same reasoning for `launch`: vgi_rpc.launcher imports filelock unconditionally
+# at module level, only pulled in via vgi-python[launch] -> vgi-rpc[cli].
 #
 # pydoclint is intentionally NOT here, matching vgi-python's own pyproject.toml
 # comment: it pulls docstring-parser-fork, which can clobber the canonical
@@ -73,6 +76,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff",
     "vgi-polars[http]",
+    "vgi-polars[launch]",
 ]
 
 # Local sibling checkout, not (yet) the published PyPI release — vgi-polars

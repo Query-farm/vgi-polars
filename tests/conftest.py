@@ -112,9 +112,11 @@ def _launch_tcp_worker(argv: list[str], *, idle_timeout: float = 1800.0) -> int:
     """Reuse-or-spawn a single warm `--tcp` worker process, keyed by `argv`.
 
     The TCP analogue of `vgi_rpc.launcher`'s hash+flock+probe+spawn design
-    (that module is unix-socket-only, and `vgi.client.Client` has no
-    unix-socket transport to pair it with — only subprocess/http/tcp; see
-    CLAUDE.md's transport-gap note). Spawned **detached**
+    (that module is AF_UNIX-only — see `test_launch_transport.py` for the
+    real thing, now that `vp.attach("launch:...")` is wired to
+    `Client.from_launch`; this helper predates that and still earns its keep
+    for `tcp://` tests, which have no launcher analogue of their own).
+    Spawned **detached**
     (`start_new_session=True`) so the worker outlives this pytest process
     and is reused by the *next* `pytest`/CI-dry-run invocation too, not just
     within one run — that cross-invocation reuse is the actual point: the
@@ -313,6 +315,42 @@ def http_catalog(http_worker_base_url: str):
 def tcp_catalog(tcp_worker_base_url: str):
     """A fresh `VgiCatalog` attached to the `example` catalog over TCP."""
     with vp.attach(tcp_worker_base_url, name="example") as cat:  # tcp:// auto-detected
+        yield cat
+
+
+@pytest.fixture(scope="session")
+def launch_state_dir() -> str:
+    """An isolated `vgi_rpc.launcher` state dir (lockfiles + sockets) for this test session.
+
+    Not the machine-wide default (`$XDG_RUNTIME_DIR/vgi-rpc[-$UID]/`) —
+    reusing that risks colliding with a launcher-managed `vgi-fixture-worker`
+    left running by unrelated local `launch:` activity (stale code after a
+    fixture edit is exactly the documented gotcha; an isolated dir sidesteps
+    it entirely rather than requiring a `pkill` before every test run).
+
+    Deliberately **not** under `tempfile.gettempdir()` — on macOS that
+    resolves to a long per-process `/var/folders/.../T/` path, and an AF_UNIX
+    socket path (state_dir + 16-hex-char hash + `.sock`) blows the ~104-byte
+    `sun_path` limit once combined with a descriptive directory name
+    (confirmed live: `bind()` raises `OSError: AF_UNIX path too long`).
+    `/tmp` is short and stable across the run instead.
+    """
+    base = Path(f"/tmp/vp-launch-{os.getuid()}")
+    base.mkdir(parents=True, exist_ok=True)
+    return str(base)
+
+
+@pytest.fixture
+def launch_catalog(worker_location: str, launch_state_dir: str):
+    """A fresh `VgiCatalog` attached to the `example` catalog over the AF_UNIX launcher.
+
+    `vp.attach("launch:...")` auto-detects the scheme (`catalog.py`'s
+    `_detect_transport`) and drives `Client.from_launch` — the real
+    `vgi_rpc.launcher` module, not `_launch_tcp_worker`'s TCP-specific
+    reuse-or-spawn analogue. A short `idle_timeout` keeps a launcher-managed
+    worker from lingering long after the test session ends.
+    """
+    with vp.attach(f"launch:{worker_location}", name="example", state_dir=launch_state_dir, idle_timeout=30.0) as cat:
         yield cat
 
 

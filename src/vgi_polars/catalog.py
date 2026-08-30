@@ -33,6 +33,7 @@ this rather than assuming it).
 from __future__ import annotations
 
 import contextlib
+import shlex
 import threading
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
 
 __all__ = ["VgiCatalog", "attach"]
 
-Transport = Literal["subprocess", "http", "tcp"]
+Transport = Literal["subprocess", "http", "tcp", "launch"]
 
 
 class VgiCatalog:
@@ -371,12 +372,15 @@ def _detect_transport(location: str) -> Transport:
     """Auto-detect transport from `location`'s scheme.
 
     Mirrors the DuckDB extension's LOCATION scheme table (`http://`/`https://`
-    -> HTTP, `tcp://` -> TCP, anything else -> subprocess/shlex argv).
+    -> HTTP, `tcp://` -> TCP, `launch:` -> the AF_UNIX launcher, anything
+    else -> subprocess/shlex argv).
     """
     if location.startswith(("http://", "https://")):
         return "http"
     if location.startswith("tcp://"):
         return "tcp"
+    if location.startswith("launch:"):
+        return "launch"
     return "subprocess"
 
 
@@ -404,14 +408,23 @@ def attach(
             isn't a recognized URL scheme), the worker command (shlex-split,
             no shell — matches `vgi.client.Client`'s own semantics, e.g.
             `"uv run --project ~/Development/vgi-python vgi-fixture-worker"`).
-            For HTTP, `"http://..."`/`"https://..."`. For TCP, `"tcp://host:port"`.
+            For HTTP, `"http://..."`/`"https://..."`. For TCP,
+            `"tcp://host:port"`. For the AF_UNIX launcher, `"launch:<argv>"`
+            (same shlex-split argv convention as subprocess, just prefixed —
+            e.g. `"launch:uv run --project ~/Development/vgi-python
+            vgi-fixture-worker"`); every caller across the machine pointing
+            at the same argv shares one warm worker process, coordinated by
+            `vgi_rpc.launcher`'s per-command-hash flock (see
+            `Client.from_launch`'s docstring). Requires the
+            `vgi-python[launch]` extra.
         name: The catalog name to attach to (a worker can serve more than one).
-        transport: `"subprocess"`, `"http"`, or `"tcp"`. Defaults to `None`,
-            which auto-detects from `location`'s scheme (an `http(s)://` or
-            `tcp://` prefix selects that transport; anything else is treated
-            as a subprocess command). Pass explicitly to override — e.g. a
-            subprocess command that happens to start with `http` for some
-            reason, though that shouldn't come up in practice.
+        transport: `"subprocess"`, `"http"`, `"tcp"`, or `"launch"`. Defaults
+            to `None`, which auto-detects from `location`'s scheme (an
+            `http(s)://`, `tcp://`, or `launch:` prefix selects that
+            transport; anything else is treated as a subprocess command).
+            Pass explicitly to override — e.g. a subprocess command that
+            happens to start with `http` for some reason, though that
+            shouldn't come up in practice.
         options: Catalog-specific ATTACH options.
         data_version_spec: Semver constraint for the catalog's data version.
         implementation_version: Semver constraint for the worker's implementation.
@@ -437,9 +450,11 @@ def attach(
             interactive login may take before giving up.
         oauth_prompt: HTTP transport only, OAuth only. Reserved for the PKCE
             flow (not yet implemented); has no effect on device-code logins.
-        worker_limit: Max concurrent workers, subprocess transport only.
+        worker_limit: Max concurrent workers. Subprocess and launch
+            transports only.
         **client_kwargs: Passed through to `Client(...)` / `Client.from_http(...)`
-            / `Client.from_tcp(...)`.
+            / `Client.from_tcp(...)` / `Client.from_launch(...)` — e.g.
+            `idle_timeout`/`state_dir`/`socket_path` for the launch transport.
 
     Returns:
         The attached `VgiCatalog`.
@@ -477,6 +492,15 @@ def attach(
             if not port:
                 raise ValueError(f"tcp transport expects 'tcp://host:port' or 'host:port', got {location!r}")
             return Client.from_tcp(host, int(port), **client_kwargs)
+        if resolved_transport == "launch":
+            # `launch:<argv>` — same shlex-split convention plain subprocess
+            # LOCATIONs use (`Client.__init__` does this itself for
+            # transport="subprocess"; `from_launch` takes an already-split
+            # argv sequence, so it's done here instead), and the same
+            # scheme-strip-then-tokenize shape the DuckDB C++ extension's
+            # own `StripLaunchScheme` + `launcher::ParseLaunchArgv` use.
+            argv = shlex.split(location.removeprefix("launch:"))
+            return Client.from_launch(argv, worker_limit=worker_limit, **client_kwargs)
         raise ValueError(f"unknown transport: {resolved_transport!r}")
 
     client = client_factory()
