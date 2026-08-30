@@ -27,7 +27,7 @@ on:
 # change on this side. Bump VGI_PYTHON_REF in lockstep with real vgi-python
 # API usage changes here; override per-run via the workflow_dispatch input.
 env:
-  VGI_PYTHON_REF: v0.31.1
+  VGI_PYTHON_REF: v0.31.2
 
 jobs:
   lint:

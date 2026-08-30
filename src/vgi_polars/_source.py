@@ -102,9 +102,16 @@ try:
     # both landed in the same vgi-python commit, so this module doesn't
     # silently break if that ever changes.
     _SUPPORTS_TABLE_FUNCTION_AT_CLAUSE = "at_unit" in _table_function_params
+    # `table_function(secrets=...)`/`table_function_plan(secrets=...)` — both
+    # landed in the same vgi-python fix (previously hardcoded `secrets=None`
+    # internally despite `scalar_function`/`aggregate_function` already
+    # exposing it). One probe covers both call sites below, same reasoning
+    # `_SUPPORTS_RESULT_CACHE` gives for reusing one probe across call sites.
+    _SUPPORTS_TABLE_FUNCTION_SECRETS = "secrets" in _table_function_params
 except Exception:  # noqa: BLE001 - never let a capability probe break import
     _SUPPORTS_RESULT_CACHE = False
     _SUPPORTS_TABLE_FUNCTION_AT_CLAUSE = False
+    _SUPPORTS_TABLE_FUNCTION_SECRETS = False
 
 
 def _canonical_arguments(arguments: Arguments) -> tuple[Any, ...] | None:
@@ -233,6 +240,7 @@ def _iter_splits_sequential(
     arguments: Arguments,
     projection_ids: list[int] | None,
     pushdown_filters: bytes | None,
+    secrets: dict[str, Any] | None,
 ) -> Iterator[tuple[Any, bytes | None, bytes | None]]:
     """Yield `(split, execution_id, init_opaque_data)` for every split of this scan.
 
@@ -246,6 +254,15 @@ def _iter_splits_sequential(
     splits' redemption, for a worker whose splits share cross-process state
     via `BoundStorage`.
     """
+    plan_kwargs: dict[str, Any] = {}
+    if secrets is not None:
+        if not _SUPPORTS_TABLE_FUNCTION_SECRETS:
+            raise VgiPolarsError(
+                "secrets requires a newer vgi-python (Client.table_function_plan predates "
+                "the secrets parameter on the installed version)"
+            )
+        plan_kwargs["secrets"] = secrets
+
     queue: list[bytes | None] = [None]
     while queue:
         cursor = queue.pop(0)
@@ -256,6 +273,7 @@ def _iter_splits_sequential(
             projection_ids=projection_ids,
             pushdown_filters=pushdown_filters,
             cursor=cursor,
+            **plan_kwargs,
         )
         for split in plan.splits:
             yield split, plan.execution_id, plan.init_opaque_data
@@ -267,7 +285,7 @@ def _iter_splits_sequential(
 IoSource = Callable[[list[str] | None, "pl.Expr | None", "int | None", "int | None"], Iterator[pl.DataFrame]]
 
 
-def make_io_source(table: _ScanSource, arrow_schema: pa.Schema) -> IoSource:
+def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict[str, Any] | None = None) -> IoSource:
     column_names = list(arrow_schema.names)
 
     def io_source(
@@ -350,6 +368,9 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema) -> IoSource:
                 # exploit split-level concurrency, but redeeming splits one at
                 # a time in order is still sound, replayable, and exercises
                 # the decomposition the worker actually tuned for.
+                # Already validated (raises if unsupported) inside
+                # _iter_splits_sequential, above — safe to pass through as-is here.
+                split_kwargs: dict[str, Any] = {"secrets": secrets} if secrets is not None else {}
                 for split, split_execution_id, split_init_opaque_data in _iter_splits_sequential(
                     client,
                     function_name=function_name,
@@ -357,6 +378,7 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema) -> IoSource:
                     arguments=arguments,
                     projection_ids=projection_ids,
                     pushdown_filters=pushdown_filters,
+                    secrets=secrets,
                 ):
                     gen = client.table_function(
                         function_name=function_name,
@@ -367,6 +389,7 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema) -> IoSource:
                         split_tokens=[split.token],
                         split_execution_id=split_execution_id,
                         split_init_opaque_data=split_init_opaque_data,
+                        **split_kwargs,
                     )
                     try:
                         yield from _process_batches(gen, expected_names, with_columns, predicate, budget)
@@ -382,8 +405,15 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema) -> IoSource:
                 # full-scan key would silently under-serve a later
                 # untruncated repeat. See `_result_cache.py`'s module
                 # docstring for the rest of this minimal slice's scope.
+                #
+                # Also skipped whenever `secrets` is supplied: the cache key
+                # has no secrets dimension (mirroring the C++ extension's own
+                # identity-scoping rationale — see its CLAUDE.md's "Identity
+                # scoping is a security boundary"), so caching here could
+                # serve one secret's result to a call made with a different
+                # one. Simplest safe answer: secrets makes a scan ineligible.
                 cache_key = None
-                if _SUPPORTS_RESULT_CACHE and n_rows is None:
+                if _SUPPORTS_RESULT_CACHE and n_rows is None and secrets is None:
                     canon_args = _canonical_arguments(arguments)
                     if canon_args is not None:
                         cache_key = (
@@ -421,6 +451,13 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema) -> IoSource:
                         "time travel requires a newer vgi-python (Client.table_function predates "
                         "at_unit/at_value on the installed version) — see CLAUDE.md's Time travel section"
                     )
+                if secrets is not None:
+                    if not _SUPPORTS_TABLE_FUNCTION_SECRETS:
+                        raise VgiPolarsError(
+                            "secrets requires a newer vgi-python (Client.table_function predates "
+                            "the secrets parameter on the installed version)"
+                        )
+                    extra_kwargs["secrets"] = secrets
 
                 gen = client.table_function(
                     function_name=function_name,

@@ -160,7 +160,9 @@ class _BranchTable:
         return []
 
 
-def scan_multi_branch(table: VgiTable, branches: list[ScanBranch]) -> pl.LazyFrame:
+def scan_multi_branch(
+    table: VgiTable, branches: list[ScanBranch], *, secrets: dict[str, Any] | None = None
+) -> pl.LazyFrame:
     """Build a `pl.concat` of one scan per branch, each with its `branch_filter` (if any) applied.
 
     Zero branches is legal (a fully-pruned multi-branch scan prunes to nothing, matching the
@@ -191,7 +193,7 @@ def scan_multi_branch(table: VgiTable, branches: list[ScanBranch]) -> pl.LazyFra
         branch_table = _BranchTable(
             catalog=table._catalog, schema_name=table.schema_name, name=table.name, branch=branch
         )
-        lf = register_io_source(make_io_source(branch_table, table.arrow_schema), schema=table.schema)
+        lf = register_io_source(make_io_source(branch_table, table.arrow_schema, secrets=secrets), schema=table.schema)
         if branch.branch_filter:
             lf = lf.filter(parse_branch_filter(branch.branch_filter))
         lazy_frames.append(lf)

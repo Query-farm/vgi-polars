@@ -241,8 +241,24 @@ class VgiTable:
         *,
         storage_options: dict[str, str] | None = None,
         acknowledge_required_filters: bool = False,
+        secrets: dict[str, Any] | None = None,
     ) -> pl.LazyFrame:
         """A lazy, pushdown-aware scan of this table.
+
+        `secrets`: pre-resolved secret values (`{name: value}`, value may be
+        a nested dict for a struct-typed secret) forwarded to the worker on
+        every `table_function`/`table_function_plan` RPC this scan issues —
+        the table-scan analogue of `scalar_function`'s/`aggregate_function`'s
+        own `secrets=` kwarg (see their docstrings), previously a real
+        vgi-python API gap: `Client.table_function` hardcoded `secrets=None`
+        despite the exchange-mode methods already exposing it. Requires
+        vgi-python with the fix (`Client.table_function(secrets=...)`); an
+        older install raises `VgiPolarsError` rather than silently dropping
+        it. Skips the result cache when given (see `_source.py`), since the
+        cache key has no secrets dimension. Not applied to a natively-
+        delegated scan (`read_parquet`-style) — that path never calls the
+        worker at all, so there is no RPC to attach secrets to; use
+        `storage_options` for that case instead.
 
         Transparently handles a multi-branch table (`pl.concat` of one scan
         per branch, each branch's `branch_filter` applied — see
@@ -276,13 +292,20 @@ class VgiTable:
             if len(branches) != 1:
                 from vgi_polars._multi_branch import scan_multi_branch
 
-                return scan_multi_branch(self, branches)
+                return scan_multi_branch(self, branches, secrets=secrets)
 
         from vgi_polars._native_scan import NATIVE_SCAN_HANDLERS
 
         scan_fn = self._scan_function_get()
         native_handler = NATIVE_SCAN_HANDLERS.get(scan_fn.function_name)
         if native_handler is not None:
+            if secrets is not None:
+                raise VgiPolarsError(
+                    f"{self.schema_name}.{self.name}: natively delegates to "
+                    f"{scan_fn.function_name!r}, which never calls the worker — secrets has no "
+                    "RPC to attach to and would be silently dropped. Use storage_options for "
+                    "native-scan credentials instead."
+                )
             required = self.required_filters()
             if required and not acknowledge_required_filters:
                 raise VgiPolarsError(
@@ -305,17 +328,20 @@ class VgiTable:
         from vgi_polars._source import make_io_source
 
         arrow_schema = self.arrow_schema
-        return register_io_source(make_io_source(self, arrow_schema), schema=self.schema)
+        return register_io_source(make_io_source(self, arrow_schema, secrets=secrets), schema=self.schema)
 
     def read(
         self,
         *,
         storage_options: dict[str, str] | None = None,
         acknowledge_required_filters: bool = False,
+        secrets: dict[str, Any] | None = None,
     ) -> pl.DataFrame:
         """An eager, full scan of this table. See `scan()` for the parameters."""
         return self.scan(
-            storage_options=storage_options, acknowledge_required_filters=acknowledge_required_filters
+            storage_options=storage_options,
+            acknowledge_required_filters=acknowledge_required_filters,
+            secrets=secrets,
         ).collect()
 
     def statistics(self) -> list[ColumnStatistics]:
