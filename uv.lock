@@ -899,7 +899,7 @@ wheels = [
 
 [[package]]
 name = "vgi-polars"
-version = "0.5.1"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "polars" },
@@ -943,7 +943,7 @@ dev = [
 
 [[package]]
 name = "vgi-python"
-version = "0.30.0"
+version = "0.31.0"
 source = { editable = "../vgi-python" }
 dependencies = [
     { name = "click" },

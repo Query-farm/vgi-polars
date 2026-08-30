@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
 from vgi.catalog.catalog_interface import CatalogAttachResult, SchemaObjectType
 from vgi.client.client import Client
@@ -42,9 +42,9 @@ from vgi.client.client import Client
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
-    from vgi.catalog.catalog_interface import AttachOpaqueData
+    from vgi.catalog.catalog_interface import AttachOpaqueData, FunctionInfo
 
     from vgi_polars._aggregate import AggregateFunction
     from vgi_polars._row_transform import RowTransformFunctionCall
@@ -218,6 +218,64 @@ class VgiCatalog:
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
         return [t.name for t in infos]
+
+    def _all_function_infos(self, schema_name: str) -> list[FunctionInfo]:
+        """Scalar + table + aggregate `FunctionInfo`s in `schema_name`.
+
+        Three separate calls (not a loop over `SchemaObjectType` values) so
+        each hits a distinct `schema_contents()` overload and mypy resolves
+        each to `list[FunctionInfo]` rather than the union return type a
+        runtime-variable `type=` argument would get. `AGGREGATE_FUNCTION` has
+        no dedicated overload in vgi-python (only `SCALAR_FUNCTION`/
+        `TABLE_FUNCTION` do — a pre-existing gap there, not a vgi-polars
+        choice), so it falls through to the generic union-typed overload;
+        the cast documents that it's still always `FunctionInfo` at runtime.
+        """
+        aggregate_infos = self._client.schema_contents(
+            attach_opaque_data=self.attach_opaque_data,
+            name=schema_name,
+            type=SchemaObjectType.AGGREGATE_FUNCTION,
+        )
+        return [
+            *self._client.schema_contents(
+                attach_opaque_data=self.attach_opaque_data, name=schema_name, type=SchemaObjectType.SCALAR_FUNCTION
+            ),
+            *self._client.schema_contents(
+                attach_opaque_data=self.attach_opaque_data, name=schema_name, type=SchemaObjectType.TABLE_FUNCTION
+            ),
+            *cast("Sequence[FunctionInfo]", aggregate_infos),
+        ]
+
+    def functions(self, schema_name: str) -> list[str]:
+        """List function names in `schema_name` (scalar, table, and aggregate).
+
+        One entry per overload, like `duckdb_functions()` — an overloaded name
+        (e.g. two `format_number` arities) appears more than once.
+        """
+        try:
+            infos = self._all_function_infos(schema_name)
+        except VGI_CLIENT_ERRORS as e:
+            raise VgiPolarsError(str(e)) from e
+        return [i.name for i in infos]
+
+    def function_info(self, schema_name: str, name: str) -> FunctionInfo:
+        """Metadata for a function: `.comment`, `.description`, `.tags`, `.examples`, and more.
+
+        Tries scalar, then table, then aggregate functions in turn and
+        returns the first name match — same resolution `scalar_function()`
+        and friends already use (no overload-by-arity disambiguation; an
+        overloaded name resolves to whichever overload the worker lists
+        first). Raises `VgiPolarsError` if no function in `schema_name` has
+        this name under any of the three kinds.
+        """
+        try:
+            infos = self._all_function_infos(schema_name)
+        except VGI_CLIENT_ERRORS as e:
+            raise VgiPolarsError(str(e)) from e
+        info = next((i for i in infos if i.name == name), None)
+        if info is None:
+            raise VgiPolarsError(f"function not found: {schema_name}.{name}")
+        return info
 
     def table(
         self, schema_name: str, name: str, *, at_unit: str | None = None, at_value: str | None = None

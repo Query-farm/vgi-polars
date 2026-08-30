@@ -37,6 +37,27 @@ def test_tables(catalog: vp.VgiCatalog) -> None:
     assert "numbers" in tables
 
 
+def test_functions(catalog: vp.VgiCatalog) -> None:
+    functions = catalog.functions("main")
+    assert "multiply" in functions
+
+
+def test_function_info_comment(catalog: vp.VgiCatalog) -> None:
+    """`multiply` declares a Meta.comment; `upper_case` doesn't (comment is None)."""
+    info = catalog.function_info("main", "multiply")
+    assert info.name == "multiply"
+    assert info.comment == "fixture function for scalar bind-parameter tests"
+    assert info.description == "Multiplies a value by a constant factor"
+
+    uncommented = catalog.function_info("main", "upper_case")
+    assert uncommented.comment is None
+
+
+def test_function_info_not_found_raises(catalog: vp.VgiCatalog) -> None:
+    with pytest.raises(VgiPolarsError, match="function not found"):
+        catalog.function_info("main", "does_not_exist_xyz")
+
+
 def test_table_schema_no_scan(catalog: vp.VgiCatalog) -> None:
     t = catalog.table("data", "numbers")
     assert t.schema == pl.Schema({"value": pl.Int64})
