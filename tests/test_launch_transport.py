@@ -17,27 +17,44 @@ collide with a launcher-managed worker left running by unrelated local
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 import vgi_polars as vp
 from vgi_polars.catalog import _detect_transport
+
+# `Client.from_launch` exists regardless of what's installed (the
+# `vgi_rpc.launcher`/`filelock` import happens lazily inside the method
+# body, at call time, not at class-definition time) -- so `hasattr` can't
+# tell us whether the `launch` extra is actually present. CI's minimum-
+# versions job deliberately installs only the package's declared-minimum
+# `[http]` extra (see ci.yml's "Create minimum-versions venv" comment), so
+# every real test here needs its own skip, not just the fixture's.
+_HAS_LAUNCH_EXTRA = importlib.util.find_spec("filelock") is not None
+requires_launch_extra = pytest.mark.skipif(
+    not _HAS_LAUNCH_EXTRA, reason="requires the vgi-python[launch] extra (filelock not installed)"
+)
 
 
 def test_launch_scheme_auto_detected() -> None:
     assert _detect_transport("launch:uv run vgi-fixture-worker") == "launch"
 
 
+@requires_launch_extra
 def test_schemas_over_launch(launch_catalog: vp.VgiCatalog) -> None:
     assert "data" in launch_catalog.schemas()
 
 
+@requires_launch_extra
 def test_scan_over_launch(launch_catalog: vp.VgiCatalog) -> None:
     out = launch_catalog.table("data", "numbers").scan().filter(pl.col("value") > 95).collect()
     assert sorted(out["value"].to_list()) == [96, 97, 98, 99]
 
 
+@requires_launch_extra
 def test_scalar_function_over_launch(launch_catalog: vp.VgiCatalog) -> None:
     multiply = launch_catalog.scalar_function("main", "multiply")
     df = pl.DataFrame({"value": [1, 2, 3]})
@@ -45,6 +62,7 @@ def test_scalar_function_over_launch(launch_catalog: vp.VgiCatalog) -> None:
     assert out["product"].to_list() == [3, 6, 9]
 
 
+@requires_launch_extra
 def test_two_catalogs_share_one_warm_worker(worker_location: str, launch_state_dir: str) -> None:
     """The whole point of the launcher over plain subprocess: two attaches sharing one worker.
 
