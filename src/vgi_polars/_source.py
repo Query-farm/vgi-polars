@@ -233,6 +233,40 @@ def _tee_batches(gen: Iterator[pa.RecordBatch], sink: list[pa.RecordBatch]) -> I
         yield batch
 
 
+class _TrackedStream:
+    """A `Client.table_function` generator that knows whether it ran to its end.
+
+    A `table_function` generator left unfinished — the scan hit its `n_rows`
+    budget, Polars closed the scan early, or local processing raised — must
+    not be followed by a plain `Client.stop()`: vgi-python's reader thread is
+    still reading the worker's stream, and stop() would read it too (see
+    `VgiCatalog._retire_exchange_client`). `release()` routes each case.
+    """
+
+    __slots__ = ("_gen", "finished")
+
+    def __init__(self, gen: Iterator[pa.RecordBatch]) -> None:
+        self._gen = gen
+        self.finished = False
+
+    def __iter__(self) -> Iterator[pa.RecordBatch]:
+        return self
+
+    def __next__(self) -> pa.RecordBatch:
+        try:
+            return next(self._gen)
+        except StopIteration:
+            # The only clean end: the generator joined its reader threads and
+            # closed its streams before stopping.
+            self.finished = True
+            raise
+
+    def release(self, catalog: VgiCatalog, client: Client) -> None:
+        """Last use of `client` for this stream: leave it to the caller's normal stop, or retire it."""
+        if not self.finished:
+            catalog._retire_exchange_client(client, self._gen)
+
+
 def _iter_splits_sequential(
     client: Client,
     *,
@@ -433,10 +467,11 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict
                             split_init_opaque_data=split_init_opaque_data,
                             **split_kwargs,
                         )
+                        stream = _TrackedStream(gen)
                         try:
-                            yield from _process_batches(gen, expected_names, with_columns, predicate, budget)
+                            yield from _process_batches(stream, expected_names, with_columns, predicate, budget)
                         finally:
-                            gen.close()
+                            stream.release(table._catalog, client)
                         if budget.exhausted:
                             return
                 else:
@@ -511,8 +546,9 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict
                         pushdown_filters=pushdown_filters,
                         **extra_kwargs,
                     )
+                    stream = _TrackedStream(gen)
                     raw_batches: list[pa.RecordBatch] = []
-                    source = _tee_batches(gen, raw_batches) if cache_key is not None else gen
+                    source = _tee_batches(stream, raw_batches) if cache_key is not None else stream
                     try:
                         yield from _process_batches(source, expected_names, with_columns, predicate, budget)
                         # Reached only on a full drain to EOS (never-partial —
@@ -521,7 +557,7 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict
                         if cache_key is not None and captured_ttl:
                             get_default_cache().put(cache_key, raw_batches, captured_ttl[0])
                     finally:
-                        gen.close()
+                        stream.release(table._catalog, client)
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
 

@@ -19,6 +19,8 @@ mock, since the point here is exercising the real `supports_splits` flag.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import polars as pl
@@ -138,6 +140,68 @@ def test_split_scan_respects_n_rows_across_split_boundary(catalog: vp.VgiCatalog
     dfs = list(io_source(with_columns=None, predicate=None, n_rows=7, batch_size=None))
     rows = [v for df in dfs for v in df["n"].to_list()]
     assert len(rows) == 7
+
+
+@requires_split_support
+def test_split_scan_cut_short_never_hangs_and_still_stops_its_client(
+    catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a scan cut short mid-stream used to hang in `Client.stop()`, intermittently.
+
+    `Client.table_function` reads the worker's stream on a background thread
+    that keeps going after the generator is closed early; stopping the client
+    straight away made a second thread read the same stream, and whichever
+    missed its end blocked forever. It hung roughly one run in five, so this
+    repeats the cut-short scan and fails on a watchdog instead of hanging.
+    Each client must still be stopped (its worker returned) — by the
+    background drain, so allow it a moment.
+    """
+    real_stop = Client.stop
+    stops: list[int] = []
+
+    def counting_stop(self: Client, *args: Any, **kwargs: Any) -> int:
+        stops.append(1)
+        return real_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(Client, "stop", counting_stop)
+
+    t = _FakeSplitTable(catalog, "split_sequence", _args(n=40, splits=8))  # 5 rows/split
+    io_source = make_io_source(t, pa.schema([pa.field("n", pa.int64())]))
+    runs = 25
+    results: list[int] = []
+
+    def scans() -> None:
+        for _ in range(runs):
+            dfs = list(io_source(with_columns=None, predicate=None, n_rows=7, batch_size=None))
+            results.append(sum(df.height for df in dfs))
+
+    worker = threading.Thread(target=scans, daemon=True)
+    worker.start()
+    worker.join(timeout=60)
+    assert not worker.is_alive(), "a scan cut short by n_rows hung"
+    assert results == [7] * runs
+
+    deadline = time.monotonic() + 30
+    while len(stops) < runs and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert len(stops) == runs
+
+
+@requires_split_support
+def test_split_scan_closed_early_by_the_consumer_releases_its_client(catalog: vp.VgiCatalog) -> None:
+    """Polars may close the scan generator before it ends; that path must not hang either."""
+    t = _FakeSplitTable(catalog, "split_sequence", _args(n=40, splits=8))
+    io_source = make_io_source(t, pa.schema([pa.field("n", pa.int64())]))
+
+    def first_batch_then_close() -> None:
+        gen = io_source(with_columns=None, predicate=None, n_rows=None, batch_size=None)
+        next(gen)
+        gen.close()
+
+    worker = threading.Thread(target=first_batch_then_close, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+    assert not worker.is_alive(), "closing a split scan early hung"
 
 
 @requires_split_support

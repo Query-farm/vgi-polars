@@ -185,6 +185,11 @@ class VgiCatalog:
         # Set once the worker turns out to be unversioned (version 0, no etag,
         # not frozen): reads then use the targeted per-schema RPCs.
         self._snapshot_uncacheable = False
+        # Exchange clients handed to a background drain by
+        # `_retire_exchange_client` (by `id`): `_exchange_client()` must not
+        # stop them itself. See that method's docstring.
+        self._retired_lock = threading.Lock()
+        self._retired_clients: set[int] = set()
         if persistent_exchange_client:
             self._thread_local = threading.local()
             self._exchange_clients_lock = threading.Lock()
@@ -325,11 +330,61 @@ class VgiCatalog:
         try:
             yield client
         finally:
-            # Best-effort return-to-pool: a failure here must never mask
-            # whatever happened (or didn't) inside the `with` block, mirroring
-            # attach()'s own `_cleanup()`.
+            with self._retired_lock:
+                retired = id(client) in self._retired_clients
+                self._retired_clients.discard(id(client))
+            if not retired:
+                # Best-effort return-to-pool: a failure here must never mask
+                # whatever happened (or didn't) inside the `with` block, mirroring
+                # attach()'s own `_cleanup()`.
+                with contextlib.suppress(Exception):
+                    client.stop()
+
+    def _retire_exchange_client(self, client: Client, abandoned: Iterator[Any]) -> None:
+        """Give up `client`, whose `table_function` stream was abandoned before its end.
+
+        Call from inside `with self._exchange_client() as client:`, as the last
+        use of `client`. A daemon thread drains `abandoned` (the unfinished
+        `table_function` generator) to its end, discarding the batches, then
+        stops the client — returning a pooled worker cleanly.
+
+        Why not just stop the client: `Client.table_function` reads each
+        worker's stream on a background thread that keeps ticking after the
+        generator is closed early, and `Client.stop()` closes (and drains) that
+        same stream from the calling thread. Two threads then read one IPC
+        stream; whichever does not receive its end blocks forever in a pipe
+        read — the hang a split scan cut short by `n_rows` hit intermittently.
+        Draining the generator first means the reader threads finish, join and
+        close their streams themselves, so `stop()` has nothing left to race.
+        The drain costs the scan's remainder, which the reader thread would
+        read anyway (it does not stop on generator close); doing it in the
+        background keeps the caller's early return early. A worker-side
+        cancel would avoid even that, but vgi-python has no safe way to cancel
+        an in-flight `table_function` from the consumer side.
+
+        In OAuth mode the per-thread persistent client is detached from its
+        thread first, so that thread's next exchange gets a fresh one rather
+        than sharing this one with the drain.
+        """
+        if self._persistent_exchange_client:
+            if getattr(self._thread_local, "client", None) is client:
+                self._thread_local.client = None
+            with self._exchange_clients_lock:
+                self._exchange_clients = [c for c in self._exchange_clients if c is not client]
+        else:
+            with self._retired_lock:
+                self._retired_clients.add(id(client))
+
+        def drain_and_stop() -> None:
+            # Any error ends the generator just as its end does; either way its
+            # reader threads are done and the client can be stopped.
+            with contextlib.suppress(Exception):
+                for _ in abandoned:
+                    pass
             with contextlib.suppress(Exception):
                 client.stop()
+
+        threading.Thread(target=drain_and_stop, name="vgi-polars-drain", daemon=True).start()
 
     def _persistent_thread_client(self) -> Client:
         """OAuth-mode fallback: one cached `Client` per calling thread. See `_exchange_client()`."""
