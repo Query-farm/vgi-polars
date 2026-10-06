@@ -89,7 +89,6 @@ import threading
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
 from vgi.catalog.catalog_interface import CatalogAttachResult, SchemaObjectType
-from vgi.client.catalog_mixin import CatalogClientError
 from vgi.client.client import Client
 
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
@@ -434,19 +433,8 @@ class VgiCatalog:
             return self._adopt(self._load_catalog(previous=held), polled_version=version)
 
     def _load_catalog(self, *, previous: CatalogSnapshot | None) -> CatalogSnapshot:
-        """`Client.load_catalog` for this attach, with its errors normalized to `CatalogClientError`.
-
-        vgi-python decodes a `catalog_contents` answer outside the error
-        conversion every other catalog call gets, so a malformed object in it
-        (e.g. an unknown wire-enum value) escapes as a bare `KeyError`/
-        `ValueError` rather than `CatalogClientError`. Normalized here so it
-        surfaces as `VgiPolarsError` like the same failure on the per-schema
-        path does.
-        """
-        try:
-            return self._client.load_catalog(attach=self._attach_result, previous=previous)
-        except (KeyError, ValueError) as e:
-            raise CatalogClientError(f"catalog_contents: {e}") from e
+        """`Client.load_catalog` for this attach (raises `VGI_CLIENT_ERRORS`, like every catalog call)."""
+        return self._client.load_catalog(attach=self._attach_result, previous=previous)
 
     def _adopt(self, snapshot: CatalogSnapshot, *, polled_version: int | None) -> CatalogSnapshot:
         """Record `snapshot` as current (caller holds `_snapshot_lock`); returns it for this read.
