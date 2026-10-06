@@ -121,6 +121,14 @@ def test_translate_predicate_is_in() -> None:
     assert len(state.predicates) == 1
 
 
+def test_translate_predicate_string_is_in_sends_plain_strings() -> None:
+    """Polars' `string_view` needles go out as `list<string>`, not `list<string_view>`."""
+    pred = _as_received_by_a_scan(pl.col("s").is_in(["a", "b"]), {"s": pl.String})
+    _, batch, _ = _decode(translate_predicate(pred, _schema(s=pa.string())))
+    assert batch.schema.field("value_0").type == pa.list_(pa.string())
+    assert batch.to_pydict()["value_0"] == [["a", "b"]]
+
+
 def test_translate_predicate_is_in_nulls_equal_declines() -> None:
     """`nulls_equal=True` changes NULL-matching semantics SQL `IN` can't express.
 
@@ -267,6 +275,18 @@ def test_filter_pushdown_end_to_end_is_in(catalog: vp.VgiCatalog) -> None:
     out = t.scan().filter(pl.col("n").is_in([4, 6, 91])).collect()
     assert sorted(out["n"].to_list()) == [4, 6, 91]
     assert set(out["pushed_filters"].to_list()) == {"n IN (4, 6, 91)"}
+
+
+def test_filter_pushdown_end_to_end_string_is_in(catalog: vp.VgiCatalog) -> None:
+    """A string `is_in` reaches the worker too.
+
+    Polars encodes string needles as Arrow `string_view`; the pushed list is
+    sent as plain `list<string>`, which every worker can read.
+    """
+    t = catalog.table("data", "filter_echo_table")
+    out = t.scan().filter(pl.col("s").is_in(["row_4", "row_91", "nope"])).collect()
+    assert sorted(out["n"].to_list()) == [4, 91]
+    assert set(out["pushed_filters"].to_list()) == {"s IN ('row_4', 'row_91', 'nope')"}
 
 
 def test_local_refilter_survives_a_worker_that_ignores_pushdown(catalog: vp.VgiCatalog, monkeypatch) -> None:

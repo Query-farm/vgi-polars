@@ -274,7 +274,18 @@ def _decode_is_in_values(node: dict[str, Any]) -> pa.Array[Any] | None:
         return None
     if batch.num_columns != 1:
         return None
-    return batch.column(0)
+    values = batch.column(0)
+    # Polars exports string/binary needles as Arrow *view* types. Those are
+    # not part of what a worker must accept (pyarrow < 19 can't even size a
+    # batch holding one, and vgi-python's consumer does), so send the plain
+    # layout — same values, same comparison semantics.
+    for is_view, plain in ((pa.types.is_string_view, pa.string()), (pa.types.is_binary_view, pa.binary())):
+        if is_view(values.type):
+            try:
+                values = values.cast(plain)
+            except pa.ArrowException:
+                return None
+    return values
 
 
 def _translate_is_in(node: dict[str, Any]) -> tuple[str, pa.Array[Any]] | None:
