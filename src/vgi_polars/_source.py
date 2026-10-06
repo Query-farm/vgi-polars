@@ -288,6 +288,35 @@ IoSource = Callable[[list[str] | None, "pl.Expr | None", "int | None", "int | No
 
 def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict[str, Any] | None = None) -> IoSource:
     column_names = list(arrow_schema.names)
+    # The scan function's bind output schema, learned by one `Client.bind` the
+    # first time a predicate is pushed (see `_bound_output_schema`). Shared by
+    # every collect of this scan; concurrent generator instances may both
+    # probe, which is harmless.
+    bound_schema_memo: list[pa.Schema | None] = []
+
+    def _bound_output_schema(
+        client: Client, *, function_name: str, schema_name: str, arguments: Arguments
+    ) -> pa.Schema | None:
+        """The resolved scan function's unprojected bind output schema, or `None` if it can't be bound.
+
+        Filter Encoding v2 names a column by its index in this schema and the
+        worker validates the name at that index, so pushdown needs it before
+        `table_function` runs — whose own bind result arrives only after the
+        filters are sent. `FunctionInfo.output_schema` is empty for a table
+        function (its schema is decided at bind), and the catalog's declared
+        columns may be named differently (see `_process_batches`), so neither
+        can stand in. A bind failure (e.g. a function that needs secrets at
+        bind) just means no filter pushdown for this scan.
+        """
+        if not bound_schema_memo:
+            try:
+                schema: pa.Schema | None = client.bind(
+                    function_name=function_name, schema_path=schema_path(schema_name), arguments=arguments
+                ).output_schema
+            except VGI_CLIENT_ERRORS:
+                schema = None
+            bound_schema_memo.append(schema)
+        return bound_schema_memo[0]
 
     def io_source(
         with_columns: list[str] | None,
@@ -320,14 +349,12 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict
         # (see the design plan). Skipping it here costs a pushdown
         # opportunity, never correctness: the local `.filter()` below still
         # runs unconditionally.
-        pushdown_filters: bytes | None = None
-        if (
+        want_filter_pushdown = (
             predicate is not None
             and function_info is not None
             and function_info.filter_pushdown
             and projection_ids is None
-        ):
-            pushdown_filters = translate_predicate(predicate, column_names)
+        )
 
         arguments = Arguments(
             positional=tuple(scan_fn.positional_arguments),
@@ -344,6 +371,18 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict
         # across concurrent callers. See catalog.py's "Thread safety" docstring.
         try:
             with table._catalog._exchange_client() as client:
+                pushdown_filters: bytes | None = None
+                if want_filter_pushdown:
+                    assert predicate is not None
+                    bound = _bound_output_schema(
+                        client, function_name=function_name, schema_name=schema_name, arguments=arguments
+                    )
+                    # A time-travel scan binds at its AT clause, which
+                    # `Client.bind` can't express — the live bind stands in
+                    # only when it agrees with the AT-resolved declared schema.
+                    if bound is not None and (table.at_unit is None or bound.names == column_names):
+                        pushdown_filters = translate_predicate(predicate, bound, column_names)
+
                 # `hasattr` guards against an installed vgi-python that predates
                 # `Client.table_function_plan`/`table_function(split_tokens=...)`
                 # (both new — see CLAUDE.md's "Splits" section) — an older pinned
