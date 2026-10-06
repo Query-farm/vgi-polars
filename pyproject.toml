@@ -35,6 +35,15 @@ dependencies = [
     # yanked from PyPI, so 1.41.1 is the actual earliest usable version.
     # Confirmed live (a real Colab install pinned in [1.31, 1.41) hit
     # AttributeError: 'DataFrame' object has no attribute 'gather').
+    #
+    # Polars 2.0 is the primary target (the lock pins it, so CI's main test job
+    # runs it); 1.x stays supported because nothing vgi-polars uses changed
+    # shape in 2.0 -- register_io_source's callback, the Expr JSON AST the
+    # filter translator reads, map_batches(streamable=...), pl.defer and
+    # DataFrame.gather all behave the same, and CI's test-min-versions job runs
+    # the whole suite at this floor. The one observable difference is how an
+    # error raised inside a scan reaches .collect(): 2.0 re-raises the original
+    # (VgiPolarsError), 1.x wraps it in polars.exceptions.ComputeError.
     "polars>=1.41.1",
     # 18.0.0, not 17: pyarrow 17.0.0 ships no cp313 wheel at all (only up to
     # cp312), so "pyarrow>=17" was unsatisfiable against this package's own

@@ -25,6 +25,14 @@ import vgi_polars as vp
 from vgi_polars._source import _check_required_filters
 from vgi_polars.errors import VgiPolarsError
 
+#: What `.collect()` raises when an `io_source` generator raises: Polars 2.0
+#: re-raises the original exception (here, `VgiPolarsError`); Polars 1.x wraps it
+#: in `ComputeError`, keeping only the message text. Exactly one per version —
+#: each assertion below pins the type that version really produces.
+_IO_SOURCE_ERROR: type[Exception] = (
+    VgiPolarsError if int(pl.__version__.split(".")[0]) >= 2 else pl.exceptions.ComputeError
+)
+
 
 def test_required_filters_reports_declared_groups(catalog: vp.VgiCatalog) -> None:
     assert catalog.table("data", "rff_simple").required_filters() == [["a"]]
@@ -37,9 +45,9 @@ def test_required_filters_reports_declared_groups(catalog: vp.VgiCatalog) -> Non
 def test_check_required_filters_raises_vgipolars_error_directly() -> None:
     """Unit-level check of the raw exception type that `_check_required_filters` raises.
 
-    Bypasses Polars' Python-source engine (which wraps any exception raised
-    inside `io_source` in `polars.exceptions.ComputeError` — see the next
-    test's comment).
+    Bypasses Polars' Python-source engine (Polars 1.x wraps any exception
+    raised inside `io_source` in `polars.exceptions.ComputeError` — see
+    `_IO_SOURCE_ERROR`).
     """
     with pytest.raises(VgiPolarsError, match=r"requires a filter on one of \['a'\]"):
         _check_required_filters([["a"]], None, "data", "rff_simple")
@@ -49,14 +57,12 @@ def test_check_required_filters_raises_vgipolars_error_directly() -> None:
 
 
 def test_scan_without_required_filter_raises(catalog: vp.VgiCatalog) -> None:
-    # `io_source` raises `VgiPolarsError`, but a Python-source generator runs
-    # inside Polars' own execution engine — an exception raised there surfaces
-    # to `.collect()` wrapped in `polars.exceptions.ComputeError` (the original
-    # message is preserved as text, not chained; see `test_errors.py`'s
-    # `_FakeTableForScanFunction` pattern for asserting the raw `VgiPolarsError`
-    # by calling `make_io_source`'s callable directly instead).
+    # `io_source` raises `VgiPolarsError` inside Polars' own execution engine;
+    # Polars 2.0 hands it to `.collect()`'s caller unchanged, Polars 1.x wraps
+    # it in `ComputeError` (message preserved as text, not chained). See
+    # `_IO_SOURCE_ERROR`.
     t = catalog.table("data", "rff_simple")
-    with pytest.raises(pl.exceptions.ComputeError, match="requires a filter"):
+    with pytest.raises(_IO_SOURCE_ERROR, match="requires a filter"):
         t.scan().collect()
 
 
@@ -86,7 +92,7 @@ def test_scan_or_group_unsatisfied_by_unrelated_column_raises(catalog: vp.VgiCat
     proves the check isn't accidentally satisfied by "some predicate exists").
     """
     t = catalog.table("data", "rff_or")
-    with pytest.raises(pl.exceptions.ComputeError, match="requires a filter"):
+    with pytest.raises(_IO_SOURCE_ERROR, match="requires a filter"):
         t.scan().filter(pl.lit(True)).collect()
 
 
@@ -119,7 +125,7 @@ def test_scan_multi_requires_every_and_group(catalog: vp.VgiCatalog) -> None:
     predicate satisfying only one must still raise.
     """
     t = catalog.table("data", "rff_multi")
-    with pytest.raises(pl.exceptions.ComputeError, match="requires a filter"):
+    with pytest.raises(_IO_SOURCE_ERROR, match="requires a filter"):
         t.scan().filter(pl.col("top") > 100).collect()
 
     out = t.scan().filter((pl.col("top") > 100) & (pl.col("s").struct.field("a") > 0)).collect()
