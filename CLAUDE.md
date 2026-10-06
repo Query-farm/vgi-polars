@@ -598,7 +598,13 @@ layout (not the locally-modified checkout) and ran the full suite against it —
 130/130 passed, 0 skipped, both transports, exactly reproducing what the workflow
 does.
 
-`v0.29.2` (`chore: 0.29.2 — client support for splits, multi-branch, cache
+Currently pinned to `v0.41.0`: the release that added `Client.load_catalog` (the
+catalog snapshot), which `pyproject.toml`'s `vgi-python>=0.41.0` floor requires — an
+older sibling checkout no longer satisfies the path source at all. The suite was
+verified against a fresh clone of the `v0.41.0` tag in a scratch sibling layout, and
+separately against the PyPI 0.41.0 wheel (`--no-sources`).
+
+History: `v0.29.2` (`chore: 0.29.2 — client support for splits, multi-branch, cache
 metadata, time travel`) is the release that closed the "Version-pin gap" Scope
 entries above cite — splits (`Client.table_function_plan`/`split_tokens`),
 multi-branch tables (`Client.table_scan_branches_get`), the result cache
