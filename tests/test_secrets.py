@@ -58,7 +58,7 @@ class _FakeSecretTable:
 
     def _function_info_get(self) -> FunctionInfo | None:
         infos = self._catalog.client.schema_contents(
-            attach_opaque_data=self._catalog.attach_opaque_data, name="main", type=SchemaObjectType.TABLE_FUNCTION
+            attach_opaque_data=self._catalog.attach_opaque_data, path=["main"], type=SchemaObjectType.TABLE_FUNCTION
         )
         return next((i for i in infos if i.name == self._fn), None)
 

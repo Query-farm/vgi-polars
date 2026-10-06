@@ -957,7 +957,7 @@ dev = [
 
 [[package]]
 name = "vgi-python"
-version = "0.31.0"
+version = "0.40.0"
 source = { editable = "../vgi-python" }
 dependencies = [
     { name = "click" },
@@ -980,11 +980,11 @@ launch = [
 requires-dist = [
     { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.16.0" },
     { name = "click" },
-    { name = "duckdb", marker = "extra == 'dev'", specifier = ">=1.5.3" },
-    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.5.3" },
+    { name = "duckdb", marker = "extra == 'dev'", specifier = "==1.5.5" },
+    { name = "duckdb", marker = "extra == 'duckdb'", specifier = "==1.5.5" },
     { name = "granian", marker = "extra == 'granian'", specifier = ">=2.7" },
-    { name = "haybarn", marker = "extra == 'haybarn'", specifier = ">=1.5.5rc1" },
-    { name = "httpx2", specifier = ">=2.9.1" },
+    { name = "haybarn", marker = "extra == 'haybarn'", specifier = "==1.5.5rc1" },
+    { name = "httpx2", specifier = ">=2.12.0" },
     { name = "jsonschema", marker = "extra == 'dev'" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy", marker = "extra == 'test-fixtures'", specifier = ">=2.4.1" },
@@ -1004,16 +1004,17 @@ requires-dist = [
     { name = "vgi-python", extras = ["test-fixtures"], marker = "extra == 'test-fixtures-writable'" },
     { name = "vgi-python", extras = ["test-fixtures", "test-fixtures-writable", "http", "launch", "oauth", "otel", "sentry", "azure"], marker = "extra == 'dev'" },
     { name = "vgi-python", extras = ["transactor"], marker = "extra == 'test-fixtures-writable'" },
-    { name = "vgi-rpc", specifier = ">=0.44.1" },
+    { name = "vgi-rpc", specifier = ">=0.48.0" },
     { name = "vgi-rpc", extras = ["cli"], marker = "extra == 'launch'" },
     { name = "vgi-rpc", extras = ["cli", "conformance", "external", "http", "oauth", "otel", "sentry"], marker = "extra == 'dev'" },
     { name = "vgi-rpc", extras = ["http"], marker = "extra == 'granian'" },
     { name = "vgi-rpc", extras = ["http"], marker = "extra == 'http'" },
+    { name = "vgi-rpc", extras = ["http", "iroh"], marker = "extra == 'iroh'" },
     { name = "vgi-rpc", extras = ["oauth"], marker = "extra == 'oauth'" },
     { name = "vgi-rpc", extras = ["otel"], marker = "extra == 'otel'" },
     { name = "vgi-rpc", extras = ["sentry"], marker = "extra == 'sentry'" },
 ]
-provides-extras = ["haybarn", "duckdb", "http", "launch", "granian", "oauth", "otel", "sentry", "azure", "test-fixtures", "transactor", "fixtures", "test-fixtures-writable", "dev"]
+provides-extras = ["haybarn", "duckdb", "http", "iroh", "launch", "granian", "oauth", "otel", "sentry", "azure", "test-fixtures", "transactor", "fixtures", "test-fixtures-writable", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1034,7 +1035,7 @@ docs = [
 
 [[package]]
 name = "vgi-rpc"
-version = "0.44.1"
+version = "0.48.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docstring-parser" },
@@ -1042,9 +1043,9 @@ dependencies = [
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1a/16/5a78053080117cac00a8945b70298d636a63d57801a33528bb63b14cdd95/vgi_rpc-0.44.1.tar.gz", hash = "sha256:37a54ae2cb7e5a7a2603aad69ece92c3c99a96906c96d2196806202ee4b70825", size = 1170809, upload-time = "2026-08-28T15:03:07.221Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2b/e3/04a284b3e1338215752c5ab382b56ff1198d593e515df31ac580976b7df6/vgi_rpc-0.48.1.tar.gz", hash = "sha256:80d6f478d98574d53411c15717f9405d929da938a28c01d4ad707b89d6524ee6", size = 1582473, upload-time = "2026-10-06T05:37:26.928Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/d6/3bfff42bd723ffcd0c2550d932e766aa65d39a886017cb9c002174e68196/vgi_rpc-0.44.1-py3-none-any.whl", hash = "sha256:e9785753bdb30e3f07f2bdbeafcddd09533cc014baa310e093a94fdeda6ad517", size = 545257, upload-time = "2026-08-28T15:03:05.268Z" },
+    { url = "https://files.pythonhosted.org/packages/94/fb/ad7e764e7c180e5ef6c7d359bfce2a65b33e66c7c55e7e24f2228dbc92e9/vgi_rpc-0.48.1-py3-none-any.whl", hash = "sha256:8b653f492bb361cc021f5ad16791acd9dce1f37d77edb0c93d0ee0633898e56e", size = 737130, upload-time = "2026-10-06T05:37:24.813Z" },
 ]
 
 [package.optional-dependencies]

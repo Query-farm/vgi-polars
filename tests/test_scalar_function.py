@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import polars as pl
 import pytest
+from vgi.client.client import Client
 
 import vgi_polars as vp
 from vgi_polars.errors import VgiPolarsError
@@ -54,15 +55,15 @@ def test_secrets_kwarg_reaches_the_exchange_call(catalog: vp.VgiCatalog, monkeyp
     """
     multiply = catalog.scalar_function("main", "multiply")
 
-    exchange_client = catalog._exchange_client()
-    real_scalar_function = exchange_client.scalar_function
+    # Patched on the class: `_exchange_client()` borrows a fresh Client per call.
+    real_scalar_function = Client.scalar_function
     seen_secrets = []
 
-    def spying_scalar_function(*, secrets=None, **kwargs):
+    def spying_scalar_function(self, *, secrets=None, **kwargs):
         seen_secrets.append(secrets)
-        return real_scalar_function(secrets=secrets, **kwargs)
+        return real_scalar_function(self, secrets=secrets, **kwargs)
 
-    monkeypatch.setattr(exchange_client, "scalar_function", spying_scalar_function)
+    monkeypatch.setattr(Client, "scalar_function", spying_scalar_function)
 
     df = pl.DataFrame({"value": [1, 2]})
     my_secret = {"vgi_example": {"secret_string": "s3cr3t"}}

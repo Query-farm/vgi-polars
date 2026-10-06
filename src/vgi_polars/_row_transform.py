@@ -119,11 +119,12 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
-from vgi.catalog.catalog_interface import FunctionInfo, FunctionStability, FunctionType, SchemaObjectType
+from vgi.catalog.catalog_interface import FunctionInfo, FunctionStability, FunctionType
 
 from vgi_polars._arguments import to_scalar
 from vgi_polars._polars_compat import arrow_to_df
 from vgi_polars._scalar import _dedup_positions
+from vgi_polars.catalog import schema_path
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -217,20 +218,21 @@ def _make_literal_call(
         row = dict(zip((f.name for f in positional_fields), args, strict=True))
         input_batch = pa.RecordBatch.from_pylist([row], schema=pa.schema(positional_fields))
         try:
-            # A fresh per-call exchange client, same rationale as the column
-            # path's bridge_fn — pl.defer's function is the concurrent-
+            # A Client borrowed for just this call, same rationale as the
+            # column path's bridge_fn — pl.defer's function is the concurrent-
             # instances hazard register_io_source has, so nothing here may
-            # be shared across calls.
-            out_batches = list(
-                catalog._exchange_client().table_in_out_function(
-                    function_name=name,
-                    schema_name=schema_name,
-                    input=iter([input_batch]),
-                    arguments=arguments,
-                    settings=settings,
-                    **_has_finalize_kwarg,
+            # be shared across calls. See catalog.py's module docstring.
+            with catalog._exchange_client() as client:
+                out_batches = list(
+                    client.table_in_out_function(
+                        function_name=name,
+                        schema_path=schema_path(schema_name),
+                        input=iter([input_batch]),
+                        arguments=arguments,
+                        settings=settings,
+                        **_has_finalize_kwarg,
+                    )
                 )
-            )
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
         if not out_batches:
@@ -256,13 +258,10 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
     def _function_info() -> FunctionInfo:
         if "info" not in cache:
             try:
-                # Catalog-metadata call — the shared client, not the per-thread
-                # exchange one; see catalog.py's "Thread safety" docstring.
-                infos = catalog.client.schema_contents(
-                    attach_opaque_data=catalog.attach_opaque_data,
-                    name=schema_name,
-                    type=SchemaObjectType.TABLE_FUNCTION,
-                )
+                # Catalog metadata, answered from the catalog snapshot (or its
+                # per-schema RPC) — never the exchange client; see catalog.py's
+                # "Thread safety" and "Catalog snapshot" docstring sections.
+                infos = catalog._function_infos(schema_name, "table_functions")
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
             info = next((i for i in infos if i.name == name), None)
@@ -331,17 +330,18 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
         probe_batch = pa.RecordBatch.from_pylist([], schema=pa.schema(positional_fields))
         bound: dict[str, pa.Schema] = {}
         try:
-            list(
-                catalog._exchange_client().table_in_out_function(
-                    function_name=name,
-                    schema_name=schema_name,
-                    input=iter([probe_batch]),
-                    arguments=arguments,
-                    settings=settings,
-                    bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
-                    **_has_finalize_kwarg,
+            with catalog._exchange_client() as client:
+                list(
+                    client.table_in_out_function(
+                        function_name=name,
+                        schema_path=schema_path(schema_name),
+                        input=iter([probe_batch]),
+                        arguments=arguments,
+                        settings=settings,
+                        bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+                        **_has_finalize_kwarg,
+                    )
                 )
-            )
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
         if "schema" not in bound:
@@ -429,17 +429,20 @@ def make_row_transform_function(catalog: VgiCatalog, schema_name: str, name: str
                 # below must stay local to this call, never hoisted to the
                 # enclosing closure, or concurrent calls interleave their
                 # bookkeeping and silently misattribute outer-column values.
-                out_batches = list(
-                    catalog._exchange_client().table_in_out_function(
-                        function_name=name,
-                        schema_name=schema_name,
-                        input=iter([shipped_batch]),
-                        arguments=arguments,
-                        settings=settings,
-                        parent_row_callback=parent_rows_by_batch.append,
-                        **_has_finalize_kwarg,
+                # _exchange_client() borrows a Client scoped to just this
+                # call, same reasoning. See catalog.py's module docstring.
+                with catalog._exchange_client() as client:
+                    out_batches = list(
+                        client.table_in_out_function(
+                            function_name=name,
+                            schema_path=schema_path(schema_name),
+                            input=iter([shipped_batch]),
+                            arguments=arguments,
+                            settings=settings,
+                            parent_row_callback=parent_rows_by_batch.append,
+                            **_has_finalize_kwarg,
+                        )
                     )
-                )
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
 

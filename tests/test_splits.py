@@ -73,7 +73,7 @@ class _FakeSplitTable:
     def _function_info_get(self):
         infos = self._catalog.client.schema_contents(
             attach_opaque_data=self._catalog.attach_opaque_data,
-            name="main",
+            path=["main"],
             type=SchemaObjectType.TABLE_FUNCTION,
         )
         return next(i for i in infos if i.name == self._fn)
@@ -147,15 +147,15 @@ def test_non_split_function_never_calls_plan(catalog: vp.VgiCatalog, monkeypatch
     `table_function_plan` is never called.
     """
     t = _FakeSplitTable(catalog, "sequence", positional_arguments=[pa.scalar(5)])
-    exchange_client = catalog._exchange_client()
+    # Patched on the class: `_exchange_client()` borrows a fresh Client per scan.
     calls: list[Any] = []
-    real_plan = exchange_client.table_function_plan
+    real_plan = Client.table_function_plan
 
     def spying_plan(*args: Any, **kwargs: Any) -> Any:
         calls.append((args, kwargs))
         return real_plan(*args, **kwargs)
 
-    monkeypatch.setattr(exchange_client, "table_function_plan", spying_plan)
+    monkeypatch.setattr(Client, "table_function_plan", spying_plan)
 
     io_source = make_io_source(t, pa.schema([pa.field("n", pa.int64())]))
     dfs = list(io_source(with_columns=None, predicate=None, n_rows=None, batch_size=None))
@@ -187,9 +187,8 @@ def test_missing_table_function_plan_falls_back_cleanly(
     that proves the graceful-degradation path itself.
     """
     t = _FakeSplitTable(catalog, "split_sequence", _args(n=9, splits=3))
-    exchange_client = catalog._exchange_client()
     if _HAS_SPLIT_SUPPORT:
-        monkeypatch.delattr(type(exchange_client), "table_function_plan")
+        monkeypatch.delattr(Client, "table_function_plan")
 
     io_source = make_io_source(t, pa.schema([pa.field("n", pa.int64())]))
     with pytest.raises(vp.VgiPolarsError, match="split-only"):
@@ -204,7 +203,6 @@ def test_split_scan_end_to_end_via_arguments_helper(catalog: vp.VgiCatalog) -> N
     catches an accidental positional/named mismatch independent of the io_source machinery.
     """
     args = Arguments(named=_args(n=6, splits=2))
-    plan = catalog._exchange_client().table_function_plan(
-        function_name="split_sequence", schema_name="main", arguments=args
-    )
+    with catalog._exchange_client() as client:
+        plan = client.table_function_plan(function_name="split_sequence", schema_path=["main"], arguments=args)
     assert len(plan.splits) == 2

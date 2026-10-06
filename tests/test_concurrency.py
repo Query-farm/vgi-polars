@@ -12,10 +12,16 @@ run multiple concurrent instances of the *same* `register_io_source` scan (used 
 the table-scan bridge) when it appears more than once in a resolved plan
 (self-join/concat/collect_all) — both confirmed empirically during planning.
 
-`VgiCatalog._exchange_client()` fixes this with one lazily-created `Client` per
-calling thread. These tests prove the fix holds, not just that it exists — deleting
-the fix should make `test_concurrent_scalar_calls_are_correct` fail the same way
-the ad hoc planning-session repro did.
+`VgiCatalog._exchange_client()` fixes this by borrowing a **fresh** `Client` for
+exactly the duration of one exchange-mode operation, then returning it — no
+shared mutable state is ever touched by more than one caller at a time, so this
+is thread-safe by construction, not by locking (see catalog.py's module
+docstring for the full rationale, including why this is also cheap: it reuses
+vgi-python's own subprocess `WorkerPool` rather than caching one `Client` per
+thread the way an earlier version of this fix did). These tests prove the fix
+holds, not just that it exists — deleting it should make
+`test_concurrent_scalar_calls_are_correct` fail the same way the ad hoc
+planning-session repro did.
 """
 
 from __future__ import annotations
@@ -134,32 +140,43 @@ def test_concurrent_catalog_metadata_calls_are_correct(worker_location: str) -> 
     assert results == {i: expected for i in range(n)}
 
 
-def test_exchange_client_is_one_per_thread(worker_location: str) -> None:
-    """Direct unit check of the pooling contract.
+def test_exchange_client_borrows_fresh_each_time(worker_location: str) -> None:
+    """Direct unit check of the borrow-and-return contract (see catalog.py's module docstring).
 
-    The same thread gets the same `Client` back; different threads get
-    different ones; detach() stops all of them (verified by attempting a
-    call on a post-detach client and expecting it to fail, since a stopped
-    Client can't serve requests).
+    Every `with cat._exchange_client() as client:` gets a genuinely fresh
+    `Client` — even two sequential calls on the *same* thread, not just
+    across different threads (the old per-thread-cached design would have
+    returned the same object for the two same-thread borrows below). Each
+    is stopped — returned to vgi-python's own `WorkerPool` — the moment its
+    `with` block exits; `Client.stop()` clears `_primary`, so checking that
+    is a direct signal the borrow was actually released, not just that the
+    object went out of scope.
     """
     with vp.attach(worker_location, name="example") as cat:
-        same_thread_a = cat._exchange_client()
-        same_thread_b = cat._exchange_client()
-        assert same_thread_a is same_thread_b
+        with cat._exchange_client() as client_a:
+            pass
+        with cat._exchange_client() as client_b:
+            pass
+        assert client_a is not client_b
+        assert client_a._primary is None
+        assert client_b._primary is None
 
         other_thread_client: list[object] = []
-        t = threading.Thread(target=lambda: other_thread_client.append(cat._exchange_client()))
+
+        def borrow_and_release() -> None:
+            with cat._exchange_client() as c:
+                other_thread_client.append(c)
+
+        t = threading.Thread(target=borrow_and_release)
         t.start()
         t.join()
 
-        assert other_thread_client[0] is not same_thread_a
-        # Every thread-local client created must be tracked for detach() to stop.
-        assert same_thread_a in cat._exchange_clients
-        assert other_thread_client[0] in cat._exchange_clients
+        assert other_thread_client[0] is not client_a
+        assert other_thread_client[0] is not client_b
 
 
 def test_no_secrets_needed_for_exchange_client_reuse(worker_location: str) -> None:
-    """A per-thread exchange client is immediately usable with no re-attach.
+    """A borrowed exchange client is immediately usable with no re-attach.
 
     Confirms `Client.table_function`/`scalar_function` genuinely don't need
     `attach_opaque_data`, so `_exchange_client()`'s "no catalog_attach"
@@ -168,16 +185,16 @@ def test_no_secrets_needed_for_exchange_client_reuse(worker_location: str) -> No
     accident.
     """
     with vp.attach(worker_location, name="example") as cat:
-        fresh = cat._exchange_client()
         batch = pa.RecordBatch.from_arrays(
             [pa.array([1], type=pa.int64())], schema=pa.schema([pa.field("value", pa.int64())])
         )
-        out = list(
-            fresh.scalar_function(
-                function_name="multiply",
-                schema_name="main",
-                input=iter([batch]),
-                arguments=Arguments(positional=(pa.scalar(3),)),
+        with cat._exchange_client() as fresh:
+            out = list(
+                fresh.scalar_function(
+                    function_name="multiply",
+                    schema_path=["main"],
+                    input=iter([batch]),
+                    arguments=Arguments(positional=(pa.scalar(3),)),
+                )
             )
-        )
         assert out[0].column(0)[0].as_py() == 3

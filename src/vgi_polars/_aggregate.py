@@ -50,10 +50,11 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
-from vgi.catalog.catalog_interface import FunctionInfo, SchemaObjectType
+from vgi.catalog.catalog_interface import FunctionInfo
 
 from vgi_polars._arguments import is_const_field, to_scalar
 from vgi_polars._polars_compat import arrow_to_df
+from vgi_polars.catalog import schema_path
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -80,21 +81,13 @@ def make_aggregate_function(catalog: VgiCatalog, schema_name: str, name: str) ->
     def _function_info() -> FunctionInfo:
         if "info" not in cache:
             try:
-                # Catalog-metadata call — the shared client, not the per-thread
-                # exchange one; see catalog.py's "Thread safety" docstring.
-                infos = catalog.client.schema_contents(
-                    attach_opaque_data=catalog.attach_opaque_data,
-                    name=schema_name,
-                    type=SchemaObjectType.AGGREGATE_FUNCTION,
-                )
+                # Catalog metadata, answered from the catalog snapshot (or its
+                # per-schema RPC) — never the exchange client; see catalog.py's
+                # "Thread safety" and "Catalog snapshot" docstring sections.
+                infos = catalog._function_infos(schema_name, "aggregate_functions")
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
-            # `schema_contents`'s overloads don't declare a `FunctionInfo`
-            # return for `type=AGGREGATE_FUNCTION` specifically (only
-            # SCALAR_FUNCTION/TABLE_FUNCTION are — a vgi-python overload gap,
-            # not a runtime one: an aggregate listing is `FunctionInfo` too),
-            # so the general overload's union return needs narrowing here.
-            info = next((i for i in infos if isinstance(i, FunctionInfo) and i.name == name), None)
+            info = next((i for i in infos if i.name == name), None)
             if info is None:
                 raise VgiPolarsError(f"aggregate function not found: {schema_name}.{name}")
             cache["info"] = info
@@ -124,18 +117,20 @@ def make_aggregate_function(catalog: VgiCatalog, schema_name: str, name: str) ->
         input_batches = df.to_arrow().to_batches()
         try:
             # Not a map_batches callback — this bridge is eager, called
-            # directly on the calling thread, never concurrently. Still uses
-            # the per-thread exchange client for consistency/safety if a
-            # future caller wraps it in something concurrent.
-            out_batch = catalog._exchange_client().aggregate_function(
-                function_name=name,
-                schema_name=schema_name,
-                input=iter(input_batches),
-                group_by=list(group_by),
-                arguments=arguments,
-                settings=settings,
-                secrets=secrets,
-            )
+            # directly on the calling thread, never concurrently. Still goes
+            # through _exchange_client() for consistency/safety if a future
+            # caller wraps it in something concurrent — see catalog.py's
+            # module docstring.
+            with catalog._exchange_client() as client:
+                out_batch = client.aggregate_function(
+                    function_name=name,
+                    schema_path=schema_path(schema_name),
+                    input=iter(input_batches),
+                    group_by=list(group_by),
+                    arguments=arguments,
+                    settings=settings,
+                    secrets=secrets,
+                )
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
 

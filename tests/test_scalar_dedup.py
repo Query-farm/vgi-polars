@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import polars as pl
 import pyarrow as pa
+from vgi.client.client import Client
 
 import vgi_polars as vp
 from vgi_polars._scalar import _dedup_positions
@@ -56,16 +57,16 @@ def test_dedup_reduces_worker_batch_size_for_low_cardinality_input(catalog: vp.V
     """
     query_seed = catalog.scalar_function("main", "query_seed")
 
-    exchange_client = catalog._exchange_client()
-    real_scalar_function = exchange_client.scalar_function
+    # Patched on the class: `_exchange_client()` borrows a fresh Client per call.
+    real_scalar_function = Client.scalar_function
     seen_batch_sizes: list[int] = []
 
-    def spying_scalar_function(*, input, **kwargs):
+    def spying_scalar_function(self, *, input, **kwargs):
         batches = list(input)
         seen_batch_sizes.append(sum(b.num_rows for b in batches))
-        return real_scalar_function(input=iter(batches), **kwargs)
+        return real_scalar_function(self, input=iter(batches), **kwargs)
 
-    monkeypatch.setattr(exchange_client, "scalar_function", spying_scalar_function)
+    monkeypatch.setattr(Client, "scalar_function", spying_scalar_function)
 
     # 8 rows, only 2 distinct values.
     df = pl.DataFrame({"value": [1, 1, 1, 1, 2, 2, 2, 2]})
@@ -78,16 +79,16 @@ def test_dedup_reduces_worker_batch_size_for_low_cardinality_input(catalog: vp.V
 def test_dedup_can_be_disabled_explicitly(catalog: vp.VgiCatalog, monkeypatch) -> None:
     query_seed = catalog.scalar_function("main", "query_seed")
 
-    exchange_client = catalog._exchange_client()
-    real_scalar_function = exchange_client.scalar_function
+    # Patched on the class: `_exchange_client()` borrows a fresh Client per call.
+    real_scalar_function = Client.scalar_function
     seen_batch_sizes: list[int] = []
 
-    def spying_scalar_function(*, input, **kwargs):
+    def spying_scalar_function(self, *, input, **kwargs):
         batches = list(input)
         seen_batch_sizes.append(sum(b.num_rows for b in batches))
-        return real_scalar_function(input=iter(batches), **kwargs)
+        return real_scalar_function(self, input=iter(batches), **kwargs)
 
-    monkeypatch.setattr(exchange_client, "scalar_function", spying_scalar_function)
+    monkeypatch.setattr(Client, "scalar_function", spying_scalar_function)
 
     df = pl.DataFrame({"value": [1, 1, 1, 1]})
     df.with_columns(query_seed(pl.col("value"), dedup=False).alias("result"))
@@ -103,16 +104,16 @@ def test_volatile_function_never_deduped(catalog: vp.VgiCatalog, monkeypatch) ->
     """
     random_int = catalog.scalar_function("main", "random_int")
 
-    exchange_client = catalog._exchange_client()
-    real_scalar_function = exchange_client.scalar_function
+    # Patched on the class: `_exchange_client()` borrows a fresh Client per call.
+    real_scalar_function = Client.scalar_function
     seen_batch_sizes: list[int] = []
 
-    def spying_scalar_function(*, input, **kwargs):
+    def spying_scalar_function(self, *, input, **kwargs):
         batches = list(input)
         seen_batch_sizes.append(sum(b.num_rows for b in batches))
-        return real_scalar_function(input=iter(batches), **kwargs)
+        return real_scalar_function(self, input=iter(batches), **kwargs)
 
-    monkeypatch.setattr(exchange_client, "scalar_function", spying_scalar_function)
+    monkeypatch.setattr(Client, "scalar_function", spying_scalar_function)
 
     # 5 rows, identical (min, max) on every row — would dedup to 1 if this
     # function were (wrongly) treated as safe.

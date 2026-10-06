@@ -15,6 +15,7 @@ from decimal import Decimal
 
 import polars as pl
 import pyarrow as pa
+from vgi.client.client import Client
 
 import vgi_polars as vp
 from vgi_polars._filter_translate import translate_predicate
@@ -174,21 +175,19 @@ def test_local_refilter_survives_a_worker_that_ignores_pushdown(catalog: vp.VgiC
     fake_info = type("FakeInfo", (), {"projection_pushdown": True, "filter_pushdown": True, "supports_splits": False})()
     monkeypatch.setattr(t, "_function_info_get", lambda: fake_info)
 
-    # Table scans go through the per-thread exchange client
-    # (VgiCatalog._exchange_client()), not the shared catalog.client — patch
-    # that one, matching the pytest test-thread's own lazily-created instance.
-    exchange_client = catalog._exchange_client()
-    real_table_function = exchange_client.table_function
+    # Table scans borrow a fresh Client per scan (VgiCatalog._exchange_client()),
+    # not the shared catalog.client — so patch the class.
+    real_table_function = Client.table_function
     calls = []
 
-    def spying_table_function(*, projection_ids=None, pushdown_filters=None, **kwargs):
+    def spying_table_function(self, *, projection_ids=None, pushdown_filters=None, **kwargs):
         # Record that pushdown was attempted...
         calls.append((projection_ids, pushdown_filters))
         # ...then deliberately call through WITHOUT any pushdown args, so the
         # "worker" ignores whatever was requested and returns everything.
-        return real_table_function(projection_ids=None, pushdown_filters=None, **kwargs)
+        return real_table_function(self, projection_ids=None, pushdown_filters=None, **kwargs)
 
-    monkeypatch.setattr(exchange_client, "table_function", spying_table_function)
+    monkeypatch.setattr(Client, "table_function", spying_table_function)
 
     # Filter only (no .select() — combining both in one call lets Polars
     # collapse with_columns to None when it's a no-op single-column select,

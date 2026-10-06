@@ -32,6 +32,21 @@ def test_scalar_function_over_http(http_catalog: vp.VgiCatalog) -> None:
     assert out["product"].to_list() == [3, 6, 9]
 
 
+def test_exchange_borrows_share_one_httpx_client_over_http(http_catalog: vp.VgiCatalog) -> None:
+    """Two borrowed exchange Clients over plain (non-OAuth) HTTP share one httpx2.Client.
+
+    Confirms catalog.py's client_factory() sharing actually happens, not
+    just that the code exists — each fresh per-call Client would otherwise
+    pay its own fresh TLS/TCP handshake instead of reusing keep-alive
+    connections, defeating the point of per-call borrowing over HTTP.
+    """
+    with http_catalog._exchange_client() as client_a:
+        httpx_a = client_a._get_or_create_httpx_client()
+    with http_catalog._exchange_client() as client_b:
+        httpx_b = client_b._get_or_create_httpx_client()
+    assert httpx_a is httpx_b
+
+
 def test_bearer_auth_with_correct_token(http_bearer_worker_base_url: str, http_bearer_token: str) -> None:
     with vp.attach(http_bearer_worker_base_url, name="example", bearer_token=http_bearer_token) as cat:
         assert "data" in cat.schemas()

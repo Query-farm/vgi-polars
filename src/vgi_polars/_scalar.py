@@ -78,10 +78,11 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
-from vgi.catalog.catalog_interface import FunctionInfo, FunctionStability, SchemaObjectType
+from vgi.catalog.catalog_interface import FunctionInfo, FunctionStability
 
 from vgi_polars._arguments import is_any_type_field, is_const_field, to_scalar
 from vgi_polars._polars_compat import arrow_to_df, arrow_to_series
+from vgi_polars.catalog import schema_path
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -154,13 +155,10 @@ def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str) -> Sc
     def _function_info() -> FunctionInfo:
         if "info" not in cache:
             try:
-                # Catalog-metadata call — the shared client, not the per-thread
-                # exchange one; see catalog.py's "Thread safety" docstring.
-                infos = catalog.client.schema_contents(
-                    attach_opaque_data=catalog.attach_opaque_data,
-                    name=schema_name,
-                    type=SchemaObjectType.SCALAR_FUNCTION,
-                )
+                # Catalog metadata, answered from the catalog snapshot (or its
+                # per-schema RPC) — never the exchange client; see catalog.py's
+                # "Thread safety" and "Catalog snapshot" docstring sections.
+                infos = catalog._function_infos(schema_name, "scalar_functions")
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
             info = next((i for i in infos if i.name == name), None)
@@ -219,17 +217,19 @@ def make_scalar_function(catalog: VgiCatalog, schema_name: str, name: str) -> Sc
 
             try:
                 # `map_batches(streamable=True)` calls `_apply` concurrently
-                # from multiple threads (confirmed live) — must use a
-                # per-thread client, never one shared across calls.
-                out_batches = list(
-                    catalog._exchange_client().scalar_function(
-                        function_name=name,
-                        schema_name=schema_name,
-                        input=iter([batch]),
-                        arguments=const_arguments,
-                        secrets=secrets,
+                # from multiple threads (confirmed live) — `_exchange_client()`
+                # borrows a Client scoped to just this call, never shared
+                # across concurrent callers. See catalog.py's module docstring.
+                with catalog._exchange_client() as client:
+                    out_batches = list(
+                        client.scalar_function(
+                            function_name=name,
+                            schema_path=schema_path(schema_name),
+                            input=iter([batch]),
+                            arguments=const_arguments,
+                            secrets=secrets,
+                        )
                     )
-                )
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
             if not out_batches:

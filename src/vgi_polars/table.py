@@ -17,11 +17,11 @@ from vgi.catalog.catalog_interface import (
     ColumnStatistics,
     FunctionInfo,
     ScanFunctionResult,
-    SchemaObjectType,
     TableInfo,
 )
 
 from vgi_polars._polars_compat import arrow_to_df
+from vgi_polars.catalog import schema_path
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -97,12 +97,20 @@ class VgiTable:
                 {"at_unit": self.at_unit, "at_value": self.at_value} if _SUPPORTS_TABLE_GET_AT_CLAUSE else {}
             )
             try:
-                info = self._catalog.client.table_get(
-                    attach_opaque_data=self._catalog.attach_opaque_data,
-                    schema_name=self.schema_name,
-                    name=self.name,
-                    **at_kwargs,
-                )
+                # A live lookup is answered from the catalog snapshot when it
+                # lists the table; a time-travel lookup, or a table the
+                # snapshot doesn't list, asks the worker by name (see
+                # catalog.py's "Catalog snapshot" docstring section).
+                info = None
+                if self.at_unit is None and self.at_value is None:
+                    info = self._catalog._table_info(self.schema_name, self.name)
+                if info is None:
+                    info = self._catalog.client.table_get(
+                        attach_opaque_data=self._catalog.attach_opaque_data,
+                        schema_path=schema_path(self.schema_name),
+                        name=self.name,
+                        **at_kwargs,
+                    )
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
             if info is None:
@@ -115,7 +123,7 @@ class VgiTable:
             try:
                 self._scan_function = self._catalog.client.table_scan_function_get(
                     attach_opaque_data=self._catalog.attach_opaque_data,
-                    schema_name=self.schema_name,
+                    schema_path=schema_path(self.schema_name),
                     name=self.name,
                     at_unit=self.at_unit,
                     at_value=self.at_value,
@@ -126,11 +134,7 @@ class VgiTable:
 
     def _lookup_table_function(self, schema_name: str, function_name: str) -> FunctionInfo | None:
         try:
-            infos = self._catalog.client.schema_contents(
-                attach_opaque_data=self._catalog.attach_opaque_data,
-                name=schema_name,
-                type=SchemaObjectType.TABLE_FUNCTION,
-            )
+            infos = self._catalog._function_infos(schema_name, "table_functions")
         except VGI_CLIENT_ERRORS:
             return None
         return next((i for i in infos if i.name == function_name), None)
@@ -226,7 +230,7 @@ class VgiTable:
             try:
                 result = self._catalog.client.table_scan_branches_get(
                     attach_opaque_data=self._catalog.attach_opaque_data,
-                    schema_name=self.schema_name,
+                    schema_path=schema_path(self.schema_name),
                     name=self.name,
                     at_unit=self.at_unit,
                     at_value=self.at_value,
@@ -355,7 +359,7 @@ class VgiTable:
         try:
             return self._catalog.client.table_column_statistics(
                 attach_opaque_data=self._catalog.attach_opaque_data,
-                schema_name=self.schema_name,
+                schema_path=schema_path(self.schema_name),
                 name=self.name,
             )
         except VGI_CLIENT_ERRORS as e:

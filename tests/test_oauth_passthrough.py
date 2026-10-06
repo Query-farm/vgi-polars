@@ -72,6 +72,35 @@ def test_oauth_defaults_are_inert() -> None:
     assert kwargs["oauth_prompt"] == "none"
 
 
+def test_oauth_mode_uses_persistent_exchange_client() -> None:
+    """OAuth attaches fall back to one cached exchange Client per thread (catalog.py's module docstring).
+
+    OAuth's own httpx wiring is mutually exclusive with the shared-httpx_client
+    trick the default per-call-borrow model relies on for HTTP (`Client.__init__`
+    rejects `oauth=True` + `httpx_client=` together), so `_exchange_client()`
+    special-cases it. Verified by call count, not object identity: `Client.
+    from_http` is mocked to return a fresh object every call, so a persistent
+    (cached) exchange client calls it exactly once across two borrows, while
+    the default per-call-fresh model (see test_concurrency.py's real-worker
+    version of this same check) would call it every time.
+    """
+    with patch("vgi_polars.catalog.Client") as mock_client_cls:
+        mock_client_cls.from_http.side_effect = lambda *args, **kwargs: MagicMock()
+        cat = vp.attach("https://worker.example.com", name="example", oauth=True)
+        assert cat._persistent_exchange_client is True
+
+        with cat._exchange_client() as client_a:
+            pass
+        with cat._exchange_client() as client_b:
+            pass
+        assert client_a is client_b
+
+        # One call for cat._client (attach()'s own initial client), one more
+        # for the persistent exchange client -- not three.
+        assert mock_client_cls.from_http.call_count == 2
+        cat.detach()
+
+
 def test_client_property_exposes_oauth_identity() -> None:
     """catalog.client.oauth_identity() is reachable -- no VgiCatalog-level wrapper needed."""
     with patch("vgi_polars.catalog.Client") as mock_client_cls:

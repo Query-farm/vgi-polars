@@ -84,16 +84,18 @@ class _CachedTable:
 
 
 def _spy_table_function(catalog: vp.VgiCatalog, monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Patch the exchange client's `table_function` to count real calls."""
-    exchange_client = catalog._exchange_client()
-    real = exchange_client.table_function
+    """Patch `Client.table_function` to count real calls.
+
+    On the class: `_exchange_client()` borrows a fresh Client per scan.
+    """
+    real = Client.table_function
     calls: list[int] = []
 
     def spying(*args, **kwargs):
         calls.append(1)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(exchange_client, "table_function", spying)
+    monkeypatch.setattr(Client, "table_function", spying)
     return calls
 
 

@@ -139,16 +139,10 @@ class _BranchTable:
         )
 
     def _function_info_get(self) -> FunctionInfo | None:
-        from vgi.catalog.catalog_interface import SchemaObjectType
-
         from vgi_polars.errors import VGI_CLIENT_ERRORS
 
         try:
-            infos = self._catalog.client.schema_contents(
-                attach_opaque_data=self._catalog.attach_opaque_data,
-                name=self.schema_name,
-                type=SchemaObjectType.TABLE_FUNCTION,
-            )
+            infos = self._catalog._function_infos(self.schema_name, "table_functions")
         except VGI_CLIENT_ERRORS:
             return None
         return next((i for i in infos if i.name == self._branch.function_name), None)

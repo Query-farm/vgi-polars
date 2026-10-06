@@ -90,10 +90,11 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import polars as pl
 import pyarrow as pa
 from vgi.arguments import Arguments
-from vgi.catalog.catalog_interface import FunctionInfo, FunctionType, SchemaObjectType
+from vgi.catalog.catalog_interface import FunctionInfo, FunctionType
 
 from vgi_polars._arguments import to_scalar
 from vgi_polars._polars_compat import arrow_to_df
+from vgi_polars.catalog import schema_path
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -157,13 +158,10 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
     def _function_info() -> FunctionInfo:
         if "info" not in cache:
             try:
-                # Catalog-metadata call — the shared client, not the per-thread
-                # exchange one; see catalog.py's "Thread safety" docstring.
-                infos = catalog.client.schema_contents(
-                    attach_opaque_data=catalog.attach_opaque_data,
-                    name=schema_name,
-                    type=SchemaObjectType.TABLE_FUNCTION,
-                )
+                # Catalog metadata, answered from the catalog snapshot (or its
+                # per-schema RPC) — never the exchange client; see catalog.py's
+                # "Thread safety" and "Catalog snapshot" docstring sections.
+                infos = catalog._function_infos(schema_name, "table_functions")
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
             info = next((i for i in infos if i.name == name), None)
@@ -222,38 +220,38 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
         # So: eagerly probe-bind here (once, at call() time, not per batch)
         # with a zero-row input batch shaped like `lf`'s own schema, via
         # `bind_result_callback`, and use ITS output_schema.
-        exchange_client = catalog._exchange_client()
         probe_batch = pa.RecordBatch.from_pylist([], schema=lf.collect_schema().to_arrow())
         bound: dict[str, pa.Schema] = {}
         try:
-            # Explicit branches, not a polymorphic `method` variable: mypy
-            # can't verify has_finalize_kwarg is always empty when calling
-            # table_buffering_function (which has no such parameter at all)
-            # from a shared call expression's static type alone -- only this
-            # branch structure lets it see each call site's real signature.
-            if is_buffering:
-                list(
-                    exchange_client.table_buffering_function(
-                        function_name=name,
-                        schema_name=schema_name,
-                        input=iter([probe_batch]),
-                        arguments=arguments,
-                        settings=settings,
-                        bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+            with catalog._exchange_client() as exchange_client:
+                # Explicit branches, not a polymorphic `method` variable: mypy
+                # can't verify has_finalize_kwarg is always empty when calling
+                # table_buffering_function (which has no such parameter at all)
+                # from a shared call expression's static type alone -- only this
+                # branch structure lets it see each call site's real signature.
+                if is_buffering:
+                    list(
+                        exchange_client.table_buffering_function(
+                            function_name=name,
+                            schema_path=schema_path(schema_name),
+                            input=iter([probe_batch]),
+                            arguments=arguments,
+                            settings=settings,
+                            bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+                        )
                     )
-                )
-            else:
-                list(
-                    exchange_client.table_in_out_function(
-                        function_name=name,
-                        schema_name=schema_name,
-                        input=iter([probe_batch]),
-                        arguments=arguments,
-                        settings=settings,
-                        bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
-                        **has_finalize_kwarg,
+                else:
+                    list(
+                        exchange_client.table_in_out_function(
+                            function_name=name,
+                            schema_path=schema_path(schema_name),
+                            input=iter([probe_batch]),
+                            arguments=arguments,
+                            settings=settings,
+                            bind_result_callback=lambda r: bound.__setitem__("schema", r.output_schema),
+                            **has_finalize_kwarg,
+                        )
                     )
-                )
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
         if "schema" not in bound:
@@ -272,33 +270,34 @@ def make_table_in_out_function(catalog: VgiCatalog, schema_name: str, name: str)
 
             try:
                 # map_batches(streamable=True) calls bridge_fn concurrently
-                # from multiple threads (confirmed live) — must use a
-                # per-thread client, never one shared across calls.
-                exchange_client = catalog._exchange_client()
-                # Explicit branches -- see the probe-bind's identical comment
-                # above for why a shared polymorphic `method` variable can't
-                # be spread with has_finalize_kwarg and still type-check.
-                if is_buffering:
-                    out_batches = list(
-                        exchange_client.table_buffering_function(
-                            function_name=name,
-                            schema_name=schema_name,
-                            input=iter(batches),
-                            arguments=arguments,
-                            settings=settings,
+                # from multiple threads (confirmed live) — _exchange_client()
+                # borrows a Client scoped to just this call, never shared
+                # across concurrent callers. See catalog.py's module docstring.
+                with catalog._exchange_client() as exchange_client:
+                    # Explicit branches -- see the probe-bind's identical comment
+                    # above for why a shared polymorphic `method` variable can't
+                    # be spread with has_finalize_kwarg and still type-check.
+                    if is_buffering:
+                        out_batches = list(
+                            exchange_client.table_buffering_function(
+                                function_name=name,
+                                schema_path=schema_path(schema_name),
+                                input=iter(batches),
+                                arguments=arguments,
+                                settings=settings,
+                            )
                         )
-                    )
-                else:
-                    out_batches = list(
-                        exchange_client.table_in_out_function(
-                            function_name=name,
-                            schema_name=schema_name,
-                            input=iter(batches),
-                            arguments=arguments,
-                            settings=settings,
-                            **has_finalize_kwarg,
+                    else:
+                        out_batches = list(
+                            exchange_client.table_in_out_function(
+                                function_name=name,
+                                schema_path=schema_path(schema_name),
+                                input=iter(batches),
+                                arguments=arguments,
+                                settings=settings,
+                                **has_finalize_kwarg,
+                            )
                         )
-                    )
             except VGI_CLIENT_ERRORS as e:
                 raise VgiPolarsError(str(e)) from e
 

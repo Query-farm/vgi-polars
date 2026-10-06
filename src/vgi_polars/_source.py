@@ -52,6 +52,7 @@ from vgi.arguments import Arguments
 from vgi_polars._filter_translate import translate_predicate
 from vgi_polars._polars_compat import arrow_to_df
 from vgi_polars._result_cache import get_default_cache, parse_cache_control
+from vgi_polars.catalog import schema_path
 from vgi_polars.errors import VGI_CLIENT_ERRORS, VgiPolarsError
 
 if TYPE_CHECKING:
@@ -268,7 +269,7 @@ def _iter_splits_sequential(
         cursor = queue.pop(0)
         plan = client.table_function_plan(
             function_name=function_name,
-            schema_name=schema_name,
+            schema_path=schema_path(schema_name),
             arguments=arguments,
             projection_ids=projection_ids,
             pushdown_filters=pushdown_filters,
@@ -296,11 +297,6 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict
     ) -> Iterator[pl.DataFrame]:
         _check_required_filters(table.required_filters(), predicate, table.schema_name, table.name)
 
-        # NOT table._catalog.client — this generator instance can run
-        # concurrently with another instance of the *same* scan (self-join,
-        # concat, collect_all), confirmed live, so exchange-mode calls need a
-        # per-thread connection. See catalog.py's "Thread safety" docstring.
-        client = table._catalog._exchange_client()
         scan_fn = table._scan_function_get()
         function_info = table._function_info_get()
         function_name = scan_fn.function_name
@@ -340,144 +336,153 @@ def make_io_source(table: _ScanSource, arrow_schema: pa.Schema, *, secrets: dict
         expected_names = [column_names[i] for i in projection_ids] if projection_ids is not None else column_names
         budget = _RemainingBudget(n_rows)
 
+        # Borrowed for the whole scan (every split, every batch) — not
+        # table._catalog.client, and not re-borrowed per batch/split: this
+        # generator instance can run concurrently with another instance of
+        # the *same* scan (self-join, concat, collect_all), confirmed live,
+        # so exchange-mode calls need their own connection, never one shared
+        # across concurrent callers. See catalog.py's "Thread safety" docstring.
         try:
-            # `hasattr` guards against an installed vgi-python that predates
-            # `Client.table_function_plan`/`table_function(split_tokens=...)`
-            # (both new — see CLAUDE.md's "Splits" section) — an older pinned
-            # release (e.g. this repo's own CI, pinned to a released tag,
-            # until it's bumped to one that includes these methods) falls
-            # back to the ordinary whole-scan path instead of an
-            # `AttributeError`. Never a correctness issue either way.
-            #
-            # `table.at_unit is None` also gates the split path off:
-            # `TableFunctionPlanRequest` carries no `at_unit`/`at_value` field
-            # at all, so planning has no way to honor a requested AT clause —
-            # taking the split path anyway would silently serve the live
-            # scan instead of the requested version. The plain path below
-            # threads `at_unit`/`at_value` correctly, so a time-travel scan
-            # of a split-capable table just loses the split decomposition,
-            # never correctness.
-            if (
-                function_info is not None
-                and function_info.supports_splits
-                and table.at_unit is None
-                and hasattr(client, "table_function_plan")
-            ):
-                # See module docstring's "Splits" section: sequential, not
-                # parallel — Polars gives this generator no mechanism to
-                # exploit split-level concurrency, but redeeming splits one at
-                # a time in order is still sound, replayable, and exercises
-                # the decomposition the worker actually tuned for.
-                # Already validated (raises if unsupported) inside
-                # _iter_splits_sequential, above — safe to pass through as-is here.
-                split_kwargs: dict[str, Any] = {"secrets": secrets} if secrets is not None else {}
-                for split, split_execution_id, split_init_opaque_data in _iter_splits_sequential(
-                    client,
-                    function_name=function_name,
-                    schema_name=schema_name,
-                    arguments=arguments,
-                    projection_ids=projection_ids,
-                    pushdown_filters=pushdown_filters,
-                    secrets=secrets,
+            with table._catalog._exchange_client() as client:
+                # `hasattr` guards against an installed vgi-python that predates
+                # `Client.table_function_plan`/`table_function(split_tokens=...)`
+                # (both new — see CLAUDE.md's "Splits" section) — an older pinned
+                # release (e.g. this repo's own CI, pinned to a released tag,
+                # until it's bumped to one that includes these methods) falls
+                # back to the ordinary whole-scan path instead of an
+                # `AttributeError`. Never a correctness issue either way.
+                #
+                # `table.at_unit is None` also gates the split path off:
+                # `TableFunctionPlanRequest` carries no `at_unit`/`at_value` field
+                # at all, so planning has no way to honor a requested AT clause —
+                # taking the split path anyway would silently serve the live
+                # scan instead of the requested version. The plain path below
+                # threads `at_unit`/`at_value` correctly, so a time-travel scan
+                # of a split-capable table just loses the split decomposition,
+                # never correctness.
+                if (
+                    function_info is not None
+                    and function_info.supports_splits
+                    and table.at_unit is None
+                    and hasattr(client, "table_function_plan")
                 ):
-                    gen = client.table_function(
+                    # See module docstring's "Splits" section: sequential, not
+                    # parallel — Polars gives this generator no mechanism to
+                    # exploit split-level concurrency, but redeeming splits one at
+                    # a time in order is still sound, replayable, and exercises
+                    # the decomposition the worker actually tuned for.
+                    # Already validated (raises if unsupported) inside
+                    # _iter_splits_sequential, above — safe to pass through as-is here.
+                    split_kwargs: dict[str, Any] = {"secrets": secrets} if secrets is not None else {}
+                    for split, split_execution_id, split_init_opaque_data in _iter_splits_sequential(
+                        client,
                         function_name=function_name,
                         schema_name=schema_name,
                         arguments=arguments,
                         projection_ids=projection_ids,
                         pushdown_filters=pushdown_filters,
-                        split_tokens=[split.token],
-                        split_execution_id=split_execution_id,
-                        split_init_opaque_data=split_init_opaque_data,
-                        **split_kwargs,
+                        secrets=secrets,
+                    ):
+                        gen = client.table_function(
+                            function_name=function_name,
+                            schema_path=schema_path(schema_name),
+                            arguments=arguments,
+                            projection_ids=projection_ids,
+                            pushdown_filters=pushdown_filters,
+                            split_tokens=[split.token],
+                            split_execution_id=split_execution_id,
+                            split_init_opaque_data=split_init_opaque_data,
+                            **split_kwargs,
+                        )
+                        try:
+                            yield from _process_batches(gen, expected_names, with_columns, predicate, budget)
+                        finally:
+                            gen.close()
+                        if budget.exhausted:
+                            return
+                else:
+                    # Result cache: only attempted for a whole, untruncated scan
+                    # (`n_rows is None`) — a LIMIT-truncated call never drains
+                    # its generator to EOS, so the raw batches captured below
+                    # would be a partial result; caching that under the
+                    # full-scan key would silently under-serve a later
+                    # untruncated repeat. See `_result_cache.py`'s module
+                    # docstring for the rest of this minimal slice's scope.
+                    #
+                    # Also skipped whenever `secrets` is supplied: the cache key
+                    # has no secrets dimension (mirroring the C++ extension's own
+                    # identity-scoping rationale — see its CLAUDE.md's "Identity
+                    # scoping is a security boundary"), so caching here could
+                    # serve one secret's result to a call made with a different
+                    # one. Simplest safe answer: secrets makes a scan ineligible.
+                    cache_key = None
+                    if _SUPPORTS_RESULT_CACHE and n_rows is None and secrets is None:
+                        canon_args = _canonical_arguments(arguments)
+                        if canon_args is not None:
+                            cache_key = (
+                                table._catalog.attach_opaque_data,
+                                function_name,
+                                schema_name,
+                                canon_args,
+                                tuple(projection_ids) if projection_ids is not None else None,
+                                pushdown_filters,
+                                table.at_unit,
+                                table.at_value,
+                            )
+
+                    cached_batches = get_default_cache().get(cache_key) if cache_key is not None else None
+                    if cached_batches is not None:
+                        yield from _process_batches(
+                            iter(cached_batches), expected_names, with_columns, predicate, budget
+                        )
+                        return
+
+                    captured_ttl: list[float] = []
+
+                    def _on_batch_metadata(metadata: Any, _captured: list[float] = captured_ttl) -> None:
+                        if not _captured:
+                            ttl = parse_cache_control(metadata)
+                            if ttl is not None:
+                                _captured.append(ttl)
+
+                    extra_kwargs: dict[str, Any] = {}
+                    if cache_key is not None:
+                        extra_kwargs["batch_metadata_callback"] = _on_batch_metadata
+                    if _SUPPORTS_TABLE_FUNCTION_AT_CLAUSE:
+                        extra_kwargs["at_unit"] = table.at_unit
+                        extra_kwargs["at_value"] = table.at_value
+                    elif table.at_unit is not None or table.at_value is not None:
+                        raise VgiPolarsError(
+                            "time travel requires a newer vgi-python (Client.table_function predates "
+                            "at_unit/at_value on the installed version) — see CLAUDE.md's Time travel section"
+                        )
+                    if secrets is not None:
+                        if not _SUPPORTS_TABLE_FUNCTION_SECRETS:
+                            raise VgiPolarsError(
+                                "secrets requires a newer vgi-python (Client.table_function predates "
+                                "the secrets parameter on the installed version)"
+                            )
+                        extra_kwargs["secrets"] = secrets
+
+                    gen = client.table_function(
+                        function_name=function_name,
+                        schema_path=schema_path(schema_name),
+                        arguments=arguments,
+                        projection_ids=projection_ids,
+                        pushdown_filters=pushdown_filters,
+                        **extra_kwargs,
                     )
+                    raw_batches: list[pa.RecordBatch] = []
+                    source = _tee_batches(gen, raw_batches) if cache_key is not None else gen
                     try:
-                        yield from _process_batches(gen, expected_names, with_columns, predicate, budget)
+                        yield from _process_batches(source, expected_names, with_columns, predicate, budget)
+                        # Reached only on a full drain to EOS (never-partial —
+                        # an early `return` inside _process_batches for a
+                        # truncated scan, or an exception, skips this commit).
+                        if cache_key is not None and captured_ttl:
+                            get_default_cache().put(cache_key, raw_batches, captured_ttl[0])
                     finally:
                         gen.close()
-                    if budget.exhausted:
-                        return
-            else:
-                # Result cache: only attempted for a whole, untruncated scan
-                # (`n_rows is None`) — a LIMIT-truncated call never drains
-                # its generator to EOS, so the raw batches captured below
-                # would be a partial result; caching that under the
-                # full-scan key would silently under-serve a later
-                # untruncated repeat. See `_result_cache.py`'s module
-                # docstring for the rest of this minimal slice's scope.
-                #
-                # Also skipped whenever `secrets` is supplied: the cache key
-                # has no secrets dimension (mirroring the C++ extension's own
-                # identity-scoping rationale — see its CLAUDE.md's "Identity
-                # scoping is a security boundary"), so caching here could
-                # serve one secret's result to a call made with a different
-                # one. Simplest safe answer: secrets makes a scan ineligible.
-                cache_key = None
-                if _SUPPORTS_RESULT_CACHE and n_rows is None and secrets is None:
-                    canon_args = _canonical_arguments(arguments)
-                    if canon_args is not None:
-                        cache_key = (
-                            table._catalog.attach_opaque_data,
-                            function_name,
-                            schema_name,
-                            canon_args,
-                            tuple(projection_ids) if projection_ids is not None else None,
-                            pushdown_filters,
-                            table.at_unit,
-                            table.at_value,
-                        )
-
-                cached_batches = get_default_cache().get(cache_key) if cache_key is not None else None
-                if cached_batches is not None:
-                    yield from _process_batches(iter(cached_batches), expected_names, with_columns, predicate, budget)
-                    return
-
-                captured_ttl: list[float] = []
-
-                def _on_batch_metadata(metadata: Any, _captured: list[float] = captured_ttl) -> None:
-                    if not _captured:
-                        ttl = parse_cache_control(metadata)
-                        if ttl is not None:
-                            _captured.append(ttl)
-
-                extra_kwargs: dict[str, Any] = {}
-                if cache_key is not None:
-                    extra_kwargs["batch_metadata_callback"] = _on_batch_metadata
-                if _SUPPORTS_TABLE_FUNCTION_AT_CLAUSE:
-                    extra_kwargs["at_unit"] = table.at_unit
-                    extra_kwargs["at_value"] = table.at_value
-                elif table.at_unit is not None or table.at_value is not None:
-                    raise VgiPolarsError(
-                        "time travel requires a newer vgi-python (Client.table_function predates "
-                        "at_unit/at_value on the installed version) — see CLAUDE.md's Time travel section"
-                    )
-                if secrets is not None:
-                    if not _SUPPORTS_TABLE_FUNCTION_SECRETS:
-                        raise VgiPolarsError(
-                            "secrets requires a newer vgi-python (Client.table_function predates "
-                            "the secrets parameter on the installed version)"
-                        )
-                    extra_kwargs["secrets"] = secrets
-
-                gen = client.table_function(
-                    function_name=function_name,
-                    schema_name=schema_name,
-                    arguments=arguments,
-                    projection_ids=projection_ids,
-                    pushdown_filters=pushdown_filters,
-                    **extra_kwargs,
-                )
-                raw_batches: list[pa.RecordBatch] = []
-                source = _tee_batches(gen, raw_batches) if cache_key is not None else gen
-                try:
-                    yield from _process_batches(source, expected_names, with_columns, predicate, budget)
-                    # Reached only on a full drain to EOS (never-partial —
-                    # an early `return` inside _process_batches for a
-                    # truncated scan, or an exception, skips this commit).
-                    if cache_key is not None and captured_ttl:
-                        get_default_cache().put(cache_key, raw_batches, captured_ttl[0])
-                finally:
-                    gen.close()
         except VGI_CLIENT_ERRORS as e:
             raise VgiPolarsError(str(e)) from e
 
