@@ -42,7 +42,7 @@ Subprocess and TCP transports need no extra; the `launch:` transport (a shared,
 launcher-managed worker over AF_UNIX) needs `vgi-polars[launch]`.
 
 **Requirements:** Python 3.13+, [Polars](https://pola.rs) 2.0 (1.41.1 and later 1.x
-releases remain supported and tested), and vgi-python 0.41.0+, which speaks the
+releases remain supported and tested), and vgi-python 0.42.1+, which speaks the
 current VGI protocol — a worker must speak the same protocol version.
 
 On Polars 2.0 an error raised while a scan runs (a worker error, a

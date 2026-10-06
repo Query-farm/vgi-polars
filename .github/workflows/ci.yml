@@ -26,7 +26,7 @@ on:
 # VGI_PYTHON_REF at a release satisfying pyproject.toml's vgi-python floor;
 # override per-run via the workflow_dispatch input.
 env:
-  VGI_PYTHON_REF: v0.41.0
+  VGI_PYTHON_REF: v0.42.1
 
 jobs:
   lint:

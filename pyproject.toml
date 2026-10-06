@@ -50,12 +50,12 @@ dependencies = [
     # requires-python = ">=3.13" -- found via the same minimum-versions
     # resolution check that caught the polars floor above.
     "pyarrow>=18",
-    # 0.41.0: Client.load_catalog (the catalog snapshot, catalog.py) first
-    # shipped there, as did the fix that makes a malformed catalog_contents
-    # item raise CatalogClientError rather than a bare KeyError/ValueError.
-    # The schema_path= catalog keywords and Filter Encoding v2 (the only
-    # filter format accepted since 0.40) are older than that.
-    "vgi-python>=0.41.0",
+    # 0.42.1: closing an unfinished Client.table_function generator cancels
+    # and joins its reader threads (_source.py's _close_stream relies on it;
+    # before, stopping the client after an early close could hang). Also
+    # needed: Client.load_catalog (0.41.0, the catalog snapshot), the
+    # schema_path= catalog keywords and Filter Encoding v2 (0.40).
+    "vgi-python>=0.42.1",
 ]
 
 [project.optional-dependencies]

@@ -94,18 +94,15 @@ loss, never a correctness one. Do not weaken this without a very good reason —
   optimization). Conjuncts whose literal type isn't in the column's type family are
   not pushed: the worker binds each predicate under DuckDB rules and a bind failure
   fails the scan. See `_filter_translate.py`'s module docstring.
-- **Never stop a `Client` while a `table_function` generator on it is unfinished.**
-  `Client._table_function_parallel` (vgi-python) reads each worker stream on a
-  background thread and does nothing when its generator is closed early — the thread
-  keeps ticking. `Client.stop()` then closes and drains the *same* stream from the
-  calling thread; two readers on one IPC pipe, and whichever misses the end blocks
-  forever. That was the intermittent hang in `test_split_scan_respects_n_rows_across_
-  split_boundary` (~1 run in 5). `_source.py`'s `_TrackedStream` detects an unfinished
-  generator (n_rows budget hit, Polars closing the scan, a local error) and hands it to
-  `VgiCatalog._retire_exchange_client`, which drains it to its end on a daemon thread
-  and only then stops the client. The real fix (cancel + join on generator close)
-  belongs in vgi-python; until then, any new code that can abandon a `table_function`
-  generator must go through `_retire_exchange_client`, never plain `stop()`.
+- **Close an unfinished `table_function` generator before stopping its `Client`.**
+  `Client.table_function` reads each worker stream on a background thread. Closing
+  the generator (vgi-python >= 0.42.1) makes each reader cancel its stream within one
+  batch, joins the threads and releases the streams; stopping the client while a
+  generator is still open instead puts two readers on one IPC pipe, which hung
+  `test_split_scan_respects_n_rows_across_split_boundary` (~1 run in 5) before
+  vgi-python fixed it. `_source.py`'s `_close_stream` closes every scan's generator in
+  a `finally` (a no-op once it has finished), so the client's normal stop is safe.
+  Any new code that can abandon a `table_function` generator must close it the same way.
 - **The table a catalog declares (`TableInfo.columns`) and what its resolved scan
   function actually names its output columns can differ.** `data.numbers` declares
   column `value`; the function it resolves to emits `n`. `_source.py` renames each
@@ -493,7 +490,7 @@ fixtures speak the same protocol. If your local checkout is ahead of PyPI, point
 To develop against an unreleased vgi-python, overlay it without touching the lock:
 `uv run --with-editable ../vgi-python pytest -v`.
 
-Dependency floors: `vgi-python>=0.41.0` (`Client.load_catalog`), `polars>=1.41.1`.
+Dependency floors: `vgi-python>=0.42.1` (clean early close of `table_function`; `Client.load_catalog` is 0.41.0), `polars>=1.41.1`.
 The lock pins Polars 2.0, the primary target; Polars 1.x stays supported because
 nothing used here changed shape in 2.0 (same `register_io_source` contract, same Expr
 JSON AST). The one visible difference: Polars 2.0 re-raises an exception from inside
@@ -594,12 +591,12 @@ across test runs).
 `.github/workflows/ci.yml` — `lint` (ruff), `build` (sdist + wheel + `twine check`),
 `test` (the full pytest suite, both transports, with coverage, vgi-python from
 `uv.lock`) and `test-min-versions` (the suite with every direct dependency at its
-declared floor, so `vgi-python>=0.41.0` really is tested at 0.41.0). Both test jobs
+declared floor, so `vgi-python>=0.42.1` really is tested at 0.42.1). Both test jobs
 check out `Query-farm/vgi-python` only for the worker fixtures, pinned to a release
 tag (`VGI_PYTHON_REF`, workflow_dispatch-overridable) rather than `main`, the same
 rationale as `~/Development/vgi`'s fixture pin: a vgi-python change can't flip this
 repo's CI red with nothing changed here. Keep `VGI_PYTHON_REF` at a release that
-satisfies the floor (currently `v0.41.0`).
+satisfies the floor (currently `v0.42.1`).
 
 History: `v0.29.2` (`chore: 0.29.2 — client support for splits, multi-branch, cache
 metadata, time travel`) is the release that closed the "Version-pin gap" Scope
