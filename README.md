@@ -38,7 +38,17 @@ Orchard remote-secret-provider path) needs an extra:
 pip install "vgi-polars[http]"
 ```
 
-Subprocess and TCP transports need no extra.
+Subprocess and TCP transports need no extra; the `launch:` transport (a shared,
+launcher-managed worker over AF_UNIX) needs `vgi-polars[launch]`.
+
+**Requirements:** Python 3.13+, [Polars](https://pola.rs) 2.0 (1.41.1 and later 1.x
+releases remain supported and tested), and vgi-python 0.41.0+, which speaks the
+current VGI protocol — a worker must speak the same protocol version.
+
+On Polars 2.0 an error raised while a scan runs (a worker error, a
+`required_filters` violation) reaches your `.collect()` call as the original
+`vgi_polars.VgiPolarsError`; Polars 1.x wraps it in `polars.exceptions.ComputeError`
+with the same message.
 
 ## Quick start
 
@@ -61,7 +71,8 @@ with vp.attach("path/to/my-vgi-worker", name="my_catalog") as cat:
 
 `attach()` auto-detects transport from the location string's scheme — a bare command
 is a subprocess worker, `http://`/`https://` is HTTP, `tcp://host:port` is raw
-Arrow-IPC framing over TCP:
+Arrow-IPC framing over TCP, `launch:<command>` is a launcher-managed worker shared by
+every process that names the same command:
 
 ```python
 cat = vp.attach("http://localhost:8080", name="my_catalog")
@@ -176,6 +187,29 @@ free. Swap in `forecast_daily`, `historical_hourly`, `marine_hourly`, or any
 of the worker's other functions the same way — one registration serves the
 literal, column, and correlated-join call shapes uniformly.
 
+## Catalog metadata caching
+
+Listing and lookup calls (`schemas()`, `tables()`, `functions()`, `function_info()`,
+a table's schema, a function's metadata) are answered from one snapshot of the whole
+catalog, loaded lazily on first use. When the worker advertises it, the snapshot is a
+single `catalog_contents` request; otherwise it is built from the per-schema listing
+requests. The snapshot is checked on every read, by the same rules the VGI DuckDB
+extension uses:
+
+- a catalog whose worker declares its metadata **frozen** is loaded once and never
+  rechecked;
+- a snapshot with an **etag** is revalidated with one conditional request (unchanged
+  keeps it, changed replaces it);
+- otherwise the catalog's **version** is polled, and a changed version reloads it;
+- a worker that reports version 0 and no etag can't say whether anything changed, so
+  after the first load each read asks the worker directly, per schema.
+
+So listings never go staler than the worker's current state, and a frozen catalog
+costs no requests after the first. A table or function missing from the snapshot is
+still looked up directly, and time-travel (`at_unit`) lookups bypass the snapshot.
+`cat.clear_cache()` drops it, for example after redeploying a frozen catalog's
+worker.
+
 ## Pushdown is an optimization, never a correctness delegation
 
 This is the single design principle vgi-polars won't compromise on, so it's worth
@@ -205,6 +239,16 @@ what the worker claims to have handled. A partial or entirely-failed pushdown
 translation is therefore only ever a performance loss — sending more rows/columns
 than strictly necessary — never a correctness one.
 
+Filters go to the worker in VGI Filter Encoding v2, one **advisory** predicate per
+translatable conjunct of the predicate's top-level `AND`: comparisons between a column
+and a literal, `is_null()`/`is_not_null()`, and `is_in([...])`. Advisory is the
+encoding's term for exactly this posture: the worker may use a predicate to skip data
+but must keep every row that satisfies it, because the client filters again. Literals
+keep their exact Polars type (a nanosecond timestamp stays nanoseconds), and a
+comparison the worker could not bind (say, a string column against a number) is not
+sent. To name columns the way the worker's scan function does, the first pushed-down
+`collect()` of a `scan()` binds the function once to learn its output schema.
+
 ## Status
 
 **Implemented:**
@@ -232,7 +276,9 @@ than strictly necessary — never a correctness one.
   [vgi-overture-maps](https://github.com/Query-farm/vgi-overture-maps-typescript),
   a pure-metadata Overture Maps catalog). Real Polars-native pushdown (row-group
   pruning, cloud range reads), not anything vgi-polars hand-rolls
-- Subprocess, HTTP, and TCP transports
+- Catalog metadata snapshot with revalidation (see
+  [Catalog metadata caching](#catalog-metadata-caching))
+- Subprocess, HTTP, TCP, and `launch:` (shared AF_UNIX worker) transports
 
 **Not implemented:**
 
@@ -240,10 +286,7 @@ than strictly necessary — never a correctness one.
 - Companion-catalog federation
 - Per-table time-travel discovery
 - The `container://`/`github://` transport schemes (a substantially larger effort — a
-  from-scratch Python transport layer, not an extension of the existing scheme table).
-  `launch:`/`unix://` (a launcher-managed shared worker) is implemented in the
-  underlying `vgi-python` client (`Client.from_launch`, v0.29.4+) but not yet wired
-  into `attach()`'s scheme detection here.
+  from-scratch Python transport layer, not an extension of the existing scheme table)
 
 ## Development
 

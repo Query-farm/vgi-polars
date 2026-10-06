@@ -67,15 +67,45 @@ loss, never a correctness one. Do not weaken this without a very good reason —
   other literal.** It comes across as a complete Arrow IPC stream embedded as a raw
   list of ints (byte values) under `Literal.Scalar.List` — decoding it (`pa.ipc.
   open_stream`) yields a RecordBatch with one unnamed column and *one row per
-  candidate value*, not a single row holding a list. `_translate_is_in`/
-  `_decode_is_in_values` in `_filter_translate.py` handle the decode; the wire
-  format's own `value_ref` column is then built the other way around — a single
-  row whose value IS the list of candidates (`pa.ListArray.from_arrays`), matching
-  `docs/filter-pushdown.md`'s `_val_0: ["active", "pending", "review"]` example.
-  Only the default `nulls_equal=False` case is translated — `nulls_equal=True`
-  makes a NULL needle match NULL haystack values, which the plain "col IN (...)"
-  wire filter can't express, so that case is left untranslated rather than risk a
-  worker that auto-applies filters silently dropping rows that should have matched.
+  candidate value*, not a single row holding a list. String/binary needles arrive as
+  Arrow **view** types (`string_view`), which are cast to plain `string`/`binary`
+  before pushing — vgi-python's v2 consumer can't size a `string_view` batch under
+  pyarrow < 19, so the raw type failed the whole scan at the declared floor. The v2
+  IN set is then ONE `list<T>` scalar holding every candidate (`_translate_is_in`/
+  `_decode_is_in_values` in `_filter_translate.py`). Only the default
+  `nulls_equal=False` case is translated — `nulls_equal=True` makes a NULL needle
+  match NULL haystack values, which SQL `IN` can't express, so that case is left
+  untranslated rather than risk a worker that applies the advisory predicate
+  dropping rows that should have matched.
+- **Filter pushdown is VGI Filter Encoding v2, and v2 names columns by the scan
+  function's *bind output*, not the catalog's declared columns.** vgi-python >= 0.40
+  rejects the old v1 `filter_spec` list outright. A v2 `column_ref` carries an index
+  into the unprojected bind output schema plus a name the worker *validates* at that
+  index — a mismatch fails the whole scan, it is not just ignored. The two name sets
+  really differ (`data.numbers` declares `value`; its function emits `n`), and
+  `FunctionInfo.output_schema` is empty for table functions (decided at bind), so
+  `_source.py` does one `Client.bind` per `scan()` (memoized in the `io_source`
+  closure) to learn the bound schema before translating; a bind failure just means no
+  pushdown. Every predicate is `advisory` (the local re-filter always runs — the spec
+  names Polars as an advisory producer), evaluation context `vgi.none.v1`, one
+  predicate per translatable top-level `AND` conjunct, literal payloads in Polars'
+  *resolved* dtype (v1 converted through Python values and truncated ns datetimes to
+  µs — for `<` that is a STRICTER predicate, i.e. lost rows, not a missed
+  optimization). Conjuncts whose literal type isn't in the column's type family are
+  not pushed: the worker binds each predicate under DuckDB rules and a bind failure
+  fails the scan. See `_filter_translate.py`'s module docstring.
+- **Never stop a `Client` while a `table_function` generator on it is unfinished.**
+  `Client._table_function_parallel` (vgi-python) reads each worker stream on a
+  background thread and does nothing when its generator is closed early — the thread
+  keeps ticking. `Client.stop()` then closes and drains the *same* stream from the
+  calling thread; two readers on one IPC pipe, and whichever misses the end blocks
+  forever. That was the intermittent hang in `test_split_scan_respects_n_rows_across_
+  split_boundary` (~1 run in 5). `_source.py`'s `_TrackedStream` detects an unfinished
+  generator (n_rows budget hit, Polars closing the scan, a local error) and hands it to
+  `VgiCatalog._retire_exchange_client`, which drains it to its end on a daemon thread
+  and only then stops the client. The real fix (cancel + join on generator close)
+  belongs in vgi-python; until then, any new code that can abandon a `table_function`
+  generator must go through `_retire_exchange_client`, never plain `stop()`.
 - **The table a catalog declares (`TableInfo.columns`) and what its resolved scan
   function actually names its output columns can differ.** `data.numbers` declares
   column `value`; the function it resolves to emits `n`. `_source.py` renames each
@@ -132,21 +162,23 @@ loss, never a correctness one. Do not weaken this without a very good reason —
 
 ## Thread safety
 
-`VgiCatalog._exchange_client()` — one lazily-created `Client` per calling thread for
-exchange-mode RPCs (`table_function`/`scalar_function`, and any future
-`aggregate_function`/`table_in_out_function`/`table_buffering_function`), all sharing
-the single `catalog_attach` from the original `attach()` call (exchange RPCs don't
-take `attach_opaque_data` at all, confirmed — no re-attach needed per thread).
-Mirrors the DuckDB C++ extension's own solved pattern: one attach, many pooled
-per-thread connections. Full rationale + empirical evidence in `catalog.py`'s module
-docstring. **Why this matters, concretely**: Polars calls `map_batches(streamable=
+`VgiCatalog._exchange_client()` — a context manager that borrows a **fresh `Client` for
+exactly one exchange-mode operation** (`table_function`/`scalar_function`/
+`aggregate_function`/`table_in_out_function`/`table_buffering_function`) and stops it
+afterwards, all sharing the single `catalog_attach` from the original `attach()` call
+(exchange RPCs don't take `attach_opaque_data` at all, confirmed — no re-attach
+needed). Cheap because vgi-python's module-level `WorkerPool` hands back an idle worker
+process rather than spawning one (HTTP shares one `httpx2.Client`); OAuth-mode HTTP is
+the exception and keeps one persistent `Client` per thread (OAuth's httpx wiring can't
+share a client, and a fresh one would re-authenticate). Full rationale + empirical
+evidence in `catalog.py`'s module docstring. **Why this matters, concretely**: Polars calls `map_batches(streamable=
 True)` callbacks concurrently from multiple threads (confirmed: 8 threads, 170
 overlapping invocation pairs for the *same* function object reused across
 `pl.collect_all`), and can run multiple concurrent instances of the same
 `register_io_source` scan when it appears more than once in a resolved plan
-(self-join/concat/collect_all sharing an upstream scan). Catalog-metadata methods
-(`schemas`/`table_get`/`schema_contents`/`table_scan_function_get`/
-`table_column_statistics`) keep using the catalog's one shared `client` —
+(self-join/concat/collect_all sharing an upstream scan). Catalog metadata is served
+from the catalog snapshot (`Client.load_catalog`, see `catalog.py`'s "Catalog
+snapshot" docstring section) through the catalog's one shared `client` —
 `CatalogClientMixin` opens a short-lived connection per call rather than reusing
 `self._primary`, verified safe under concurrency by
 `test_concurrent_catalog_metadata_calls_are_correct`, not just assumed.
@@ -450,6 +482,17 @@ uv run pytest -v
 `pyproject.toml`, path `../vgi-python`), not the published PyPI release — this repo
 tracks vgi-python's client-side surface as both develop together, the same way
 `vgi-spark`'s `settings.gradle.kts` composite-builds a sibling `vgi-java` checkout.
+To test against the *released* vgi-python instead, install into a separate venv with
+`uv pip install --no-sources -e ".[http,launch]" "vgi-python==<version>"` (the worker
+fixtures still come from a vgi-python checkout via `VGI_PYTHON` — they are not in the
+wheel).
+
+Dependency floors: `vgi-python>=0.41.0` (`Client.load_catalog`), `polars>=1.41.1`.
+The lock pins Polars 2.0, the primary target; Polars 1.x stays supported because
+nothing used here changed shape in 2.0 (same `register_io_source` contract, same Expr
+JSON AST). The one visible difference: Polars 2.0 re-raises an exception from inside
+an `io_source` unchanged, 1.x wraps it in `ComputeError` —
+`tests/test_required_filters.py` pins the right one per installed major version.
 
 Integration tests use `vgi-fixture-worker` against the `example` catalog (schema
 `data`, table `numbers`; schema `main`, scalar function `multiply`; among many others —
