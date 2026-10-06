@@ -478,14 +478,20 @@ uv sync
 uv run pytest -v
 ```
 
-`vgi-python` is sourced from the local sibling checkout (`[tool.uv.sources]` in
-`pyproject.toml`, path `../vgi-python`), not the published PyPI release — this repo
-tracks vgi-python's client-side surface as both develop together, the same way
-`vgi-spark`'s `settings.gradle.kts` composite-builds a sibling `vgi-java` checkout.
-To test against the *released* vgi-python instead, install into a separate venv with
-`uv pip install --no-sources -e ".[http,launch]" "vgi-python==<version>"` (the worker
-fixtures still come from a vgi-python checkout via `VGI_PYTHON` — they are not in the
-wheel).
+`vgi-python` is an ordinary PyPI dependency, pinned in `uv.lock`. There is no
+`[tool.uv.sources]` path override any more (removed 2026-10-06): it made `uv lock`
+follow whatever the local checkout was on, shipped `../vgi-python` in the sdist, and
+meant CI's minimum-versions job never exercised the vgi-python floor.
+
+The integration tests still need a vgi-python **checkout** for the worker fixtures
+(`vgi-fixture-worker`, `vgi-fixture-http`, ...), which are not in the wheel.
+`VGI_PYTHON` (default `~/Development/vgi-python`) points at it; it must have a synced
+`.venv` (`uv sync --extra http`) and be on a release that satisfies the floor, so the
+fixtures speak the same protocol. If your local checkout is ahead of PyPI, point
+`VGI_PYTHON` at a clone of the matching release tag instead.
+
+To develop against an unreleased vgi-python, overlay it without touching the lock:
+`uv run --with-editable ../vgi-python pytest -v`.
 
 Dependency floors: `vgi-python>=0.41.0` (`Client.load_catalog`), `polars>=1.41.1`.
 The lock pins Polars 2.0, the primary target; Polars 1.x stays supported because
@@ -585,24 +591,15 @@ across test runs).
 
 ## CI
 
-`.github/workflows/ci.yml` — `lint` (ruff) + `test` (the full pytest suite, both
-transports, with coverage). Checks out `Query-farm/vgi-python` (public on GitHub) as
-a **sibling directory** alongside this repo, exactly reproducing the local dev layout
-`[tool.uv.sources]` expects (`path = "../vgi-python"`) — the same pattern vgi-python's
-own `integration.yml` uses to pull in a second repo, and the same rationale as
-`~/Development/vgi`'s `VGI_FIXTURES_REF`: pinned to a release tag (`VGI_PYTHON_REF:
-v0.29.2`, workflow_dispatch-overridable), not `main`, so a vgi-python change can't
-silently flip this repo's CI red with nothing changed here. Verified end-to-end by
-hand before committing: cloned `vgi-python@v0.29.2` fresh into a scratch sibling
-layout (not the locally-modified checkout) and ran the full suite against it —
-130/130 passed, 0 skipped, both transports, exactly reproducing what the workflow
-does.
-
-Currently pinned to `v0.41.0`: the release that added `Client.load_catalog` (the
-catalog snapshot), which `pyproject.toml`'s `vgi-python>=0.41.0` floor requires — an
-older sibling checkout no longer satisfies the path source at all. The suite was
-verified against a fresh clone of the `v0.41.0` tag in a scratch sibling layout, and
-separately against the PyPI 0.41.0 wheel (`--no-sources`).
+`.github/workflows/ci.yml` — `lint` (ruff), `build` (sdist + wheel + `twine check`),
+`test` (the full pytest suite, both transports, with coverage, vgi-python from
+`uv.lock`) and `test-min-versions` (the suite with every direct dependency at its
+declared floor, so `vgi-python>=0.41.0` really is tested at 0.41.0). Both test jobs
+check out `Query-farm/vgi-python` only for the worker fixtures, pinned to a release
+tag (`VGI_PYTHON_REF`, workflow_dispatch-overridable) rather than `main`, the same
+rationale as `~/Development/vgi`'s fixture pin: a vgi-python change can't flip this
+repo's CI red with nothing changed here. Keep `VGI_PYTHON_REF` at a release that
+satisfies the floor (currently `v0.41.0`).
 
 History: `v0.29.2` (`chore: 0.29.2 — client support for splits, multi-branch, cache
 metadata, time travel`) is the release that closed the "Version-pin gap" Scope

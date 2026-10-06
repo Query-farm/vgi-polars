@@ -938,9 +938,9 @@ dev = [
 requires-dist = [
     { name = "polars", specifier = ">=1.41.1" },
     { name = "pyarrow", specifier = ">=18" },
-    { name = "vgi-python", editable = "../vgi-python" },
-    { name = "vgi-python", extras = ["http"], marker = "extra == 'http'", editable = "../vgi-python" },
-    { name = "vgi-python", extras = ["launch"], marker = "extra == 'launch'", editable = "../vgi-python" },
+    { name = "vgi-python", specifier = ">=0.41.0" },
+    { name = "vgi-python", extras = ["http"], marker = "extra == 'http'" },
+    { name = "vgi-python", extras = ["launch"], marker = "extra == 'launch'" },
 ]
 provides-extras = ["http", "launch"]
 
@@ -958,7 +958,7 @@ dev = [
 [[package]]
 name = "vgi-python"
 version = "0.41.0"
-source = { editable = "../vgi-python" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "httpx2" },
@@ -967,6 +967,10 @@ dependencies = [
     { name = "typer" },
     { name = "vgi-rpc" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/13/7d/3c3eeb2d4abd449470483155fae1ec98edabe89d3c51d7f56445b07593db/vgi_python-0.41.0.tar.gz", hash = "sha256:101a266cf5323e6c53658390877c954d4bc2fe503265da7f96b32f6422ef4ed2", size = 4582226, upload-time = "2026-10-06T15:59:40.234Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/f6/af8120dea72e01fc0c16fc53e129b093bf91e44d7ae076bd8e1cb45493df/vgi_python-0.41.0-py3-none-any.whl", hash = "sha256:51daf590357b920edd3db49de4ae3d4d576cd3aee75bb8ff3009c523f5835730", size = 1240108, upload-time = "2026-10-06T15:59:38.081Z" },
+]
 
 [package.optional-dependencies]
 http = [
@@ -974,63 +978,6 @@ http = [
 ]
 launch = [
     { name = "vgi-rpc", extra = ["cli"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.16.0" },
-    { name = "click" },
-    { name = "duckdb", marker = "extra == 'dev'", specifier = "==1.5.5" },
-    { name = "duckdb", marker = "extra == 'duckdb'", specifier = "==1.5.5" },
-    { name = "granian", marker = "extra == 'granian'", specifier = ">=2.7" },
-    { name = "haybarn", marker = "extra == 'haybarn'", specifier = "==1.5.5rc1" },
-    { name = "httpx2", specifier = ">=2.12.0" },
-    { name = "jsonschema", marker = "extra == 'dev'" },
-    { name = "mypy", marker = "extra == 'dev'" },
-    { name = "numpy", marker = "extra == 'test-fixtures'", specifier = ">=2.4.1" },
-    { name = "platformdirs" },
-    { name = "pyarrow" },
-    { name = "pyarrow-stubs", marker = "extra == 'dev'" },
-    { name = "pymssql", marker = "extra == 'azure'", specifier = ">=2.3.0" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "pytest-examples", marker = "extra == 'dev'" },
-    { name = "pytest-ruff", marker = "extra == 'dev'" },
-    { name = "pytest-xdist", marker = "extra == 'dev'" },
-    { name = "ruff", marker = "extra == 'dev'" },
-    { name = "sqlglot", marker = "extra == 'transactor'" },
-    { name = "typer", specifier = ">=0.9" },
-    { name = "vgi-fixtures", marker = "extra == 'fixtures'", editable = "../vgi-python/packages/vgi-fixtures" },
-    { name = "vgi-python", extras = ["test-fixtures"], marker = "extra == 'test-fixtures-writable'" },
-    { name = "vgi-python", extras = ["test-fixtures", "test-fixtures-writable", "http", "launch", "oauth", "otel", "sentry", "azure"], marker = "extra == 'dev'" },
-    { name = "vgi-python", extras = ["transactor"], marker = "extra == 'test-fixtures-writable'" },
-    { name = "vgi-rpc", specifier = ">=0.48.0" },
-    { name = "vgi-rpc", extras = ["cli"], marker = "extra == 'launch'" },
-    { name = "vgi-rpc", extras = ["cli", "conformance", "external", "http", "oauth", "otel", "sentry"], marker = "extra == 'dev'" },
-    { name = "vgi-rpc", extras = ["http"], marker = "extra == 'granian'" },
-    { name = "vgi-rpc", extras = ["http"], marker = "extra == 'http'" },
-    { name = "vgi-rpc", extras = ["http", "iroh"], marker = "extra == 'iroh'" },
-    { name = "vgi-rpc", extras = ["oauth"], marker = "extra == 'oauth'" },
-    { name = "vgi-rpc", extras = ["otel"], marker = "extra == 'otel'" },
-    { name = "vgi-rpc", extras = ["sentry"], marker = "extra == 'sentry'" },
-]
-provides-extras = ["haybarn", "duckdb", "http", "iroh", "launch", "granian", "oauth", "otel", "sentry", "azure", "test-fixtures", "transactor", "fixtures", "test-fixtures-writable", "dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "lxml", specifier = ">=6.0.2" },
-    { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "vgi-fixtures", editable = "../vgi-python/packages/vgi-fixtures" },
-]
-docs = [
-    { name = "mkdocs", specifier = ">=1.6" },
-    { name = "mkdocs-d2-plugin", specifier = ">=1.4" },
-    { name = "mkdocs-material", specifier = ">=9.5" },
-    { name = "mkdocs-section-index", specifier = ">=0.3" },
-    { name = "mkdocstrings", extras = ["python"], specifier = ">=0.27" },
-    { name = "pygments", specifier = ">=2.20" },
-    { name = "pymdown-extensions", specifier = ">=10.21.2" },
-    { name = "ruff", specifier = ">=0.1" },
 ]
 
 [[package]]

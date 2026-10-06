@@ -292,20 +292,23 @@ sent. To name columns the way the worker's scan function does, the first pushed-
 
 ```bash
 git clone https://github.com/Query-farm/vgi-polars.git
-git clone https://github.com/Query-farm/vgi-python.git   # sibling checkout — see below
+git clone https://github.com/Query-farm/vgi-python.git   # test fixture workers only
+(cd vgi-python && uv sync --extra http)
 cd vgi-polars
 uv sync
-uv run pytest -v
+VGI_PYTHON=../vgi-python uv run pytest -v
 ```
 
-`vgi-python` is pulled from that local sibling checkout (`[tool.uv.sources]` in
-`pyproject.toml`, path `../vgi-python`) rather than the published PyPI release,
-because this repo tracks vgi-python's client-side surface as both projects develop
-together — the same pattern `vgi-spark`'s `settings.gradle.kts` uses to
-composite-build a sibling `vgi-java` checkout. Integration tests need a
-`vgi-fixture-worker` binary from that checkout; `VGI_PYTHON` (default
-`~/Development/vgi-python`) picks which one, and `VGI_TEST_WORKER` overrides the
-binary path directly if you need something other than the default venv location.
+`vgi-python` itself is an ordinary PyPI dependency (pinned in `uv.lock`). The
+vgi-python checkout is only needed for the integration tests' worker fixtures
+(`vgi-fixture-worker`, `vgi-fixture-http`, ...), which are deliberately not in the
+published wheel. `VGI_PYTHON` (default `~/Development/vgi-python`) points the tests at
+that checkout's `.venv`; check out a release tag that satisfies vgi-polars'
+`vgi-python` floor so the fixtures speak the same protocol. `VGI_TEST_WORKER`
+overrides the worker binary path directly.
+
+To develop against an unreleased vgi-python, overlay your checkout without touching
+the lock: `uv run --with-editable ../vgi-python pytest -v`.
 
 `uv run mypy src/`, `uv run ruff check src/ tests/`, and `uv run ruff format --check
 src/ tests/` mirror what CI runs; `tests/test_docstrings.py` runs `pydoclint` as part

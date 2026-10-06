@@ -90,15 +90,6 @@ dev = [
     "vgi-polars[launch]",
 ]
 
-# Local sibling checkout, not (yet) the published PyPI release — vgi-polars
-# tracks vgi-python's client-side surface as it develops, the same way
-# vgi-spark's settings.gradle.kts composite-builds a sibling vgi-java checkout
-# ahead of its own release. This means a `../vgi-python` checkout must exist
-# next to this repo for `uv sync` to work (see CLAUDE.md's Build/Test section)
-# — CI reproduces the same layout by checking out both repos as siblings.
-[tool.uv.sources]
-vgi-python = { path = "../vgi-python", editable = true }
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

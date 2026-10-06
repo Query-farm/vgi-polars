@@ -13,19 +13,18 @@ on:
         required: false
         default: ""
 
-# vgi-polars depends on vgi-python via a LOCAL SIBLING checkout
-# ([tool.uv.sources] in pyproject.toml, path = "../vgi-python"), not the
-# published PyPI release — this repo tracks vgi-python's client-side surface
-# as both develop together, the same way vgi-spark's settings.gradle.kts
-# composite-builds a sibling vgi-java checkout. CI therefore checks out BOTH
-# repos as siblings under the same workspace root, exactly mirroring local
-# dev's ~/Development/vgi-polars + ~/Development/vgi-python layout.
+# vgi-polars installs vgi-python from PyPI like any other dependency (the
+# `test` job via uv.lock, `test-min-versions` at the pyproject floor). CI
+# still checks out Query-farm/vgi-python, but ONLY to run its test fixture
+# workers (vgi-fixture-worker, vgi-fixture-http, ...): they live in the repo's
+# dev-only sidecar and are deliberately absent from the published wheel. The
+# tests find them through VGI_PYTHON (that checkout's .venv).
 #
-# Pinned (not `main`) for the same reason ~/Development/vgi's CI pins
-# VGI_FIXTURES_REF to a release tag: a protocol/fixture change landing on
-# vgi-python's main would otherwise silently flip this repo's CI red with no
-# change on this side. Bump VGI_PYTHON_REF in lockstep with real vgi-python
-# API usage changes here; override per-run via the workflow_dispatch input.
+# Pinned to a release tag (not `main`) so the fixtures speak the same protocol
+# as the vgi-python release under test, and a change landing on vgi-python's
+# main can't flip this repo's CI red with no change on this side. Keep
+# VGI_PYTHON_REF at a release satisfying pyproject.toml's vgi-python floor;
+# override per-run via the workflow_dispatch input.
 env:
   VGI_PYTHON_REF: v0.41.0
 
@@ -48,11 +47,8 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
-      # Builds against the plain `vgi-python>=...` dependency bound in
-      # pyproject.toml (PyPI), not the [tool.uv.sources] sibling-checkout dev
-      # override — proves the package a `release.yml` run would publish
-      # actually builds and has valid metadata, on every push/PR, not just
-      # at release time.
+      # Proves the package a `release.yml` run would publish actually builds
+      # and has valid metadata, on every push/PR, not just at release time.
       - name: Build (sdist + wheel)
         run: uv build --sdist --wheel --out-dir dist .
       - name: Validate metadata
@@ -66,7 +62,7 @@ jobs:
         with:
           path: vgi-polars
 
-      - name: Checkout vgi-python (sibling)
+      - name: Checkout vgi-python (test fixture workers)
         uses: actions/checkout@v7
         with:
           repository: Query-farm/vgi-python
@@ -79,10 +75,11 @@ jobs:
           enable-cache: true
           python-version: "3.13"
 
-      # --extra http: falcon/waitress, needed for vgi-fixture-http to serve.
-      # The workspace `dev` group (synced by default) is what actually
-      # provides the vgi-fixture-worker/vgi-fixture-http console scripts.
-      - name: Sync vgi-python
+      # Builds the fixture workers' own environment (vgi-python's .venv), which
+      # VGI_PYTHON points the tests at. --extra http: falcon/waitress, needed
+      # for vgi-fixture-http to serve. The workspace `dev` group (synced by
+      # default) provides the vgi-fixture-* console scripts.
+      - name: Sync vgi-python (fixture workers)
         working-directory: vgi-python
         run: uv sync --extra http
 
@@ -90,11 +87,9 @@ jobs:
         working-directory: vgi-polars
         run: uv sync
 
-      # Needs the full sibling-checkout environment (vgi-python's types, not
-      # just vgi-polars' own code) to resolve imports, so it lives in this
-      # job rather than `lint` — mirrors vgi-python's own "Type check (mypy)"
-      # CI step, just riding this job's existing sibling setup instead of a
-      # dedicated one.
+      # Needs the synced environment (vgi-python's types, not just
+      # vgi-polars' own code) to resolve imports, so it lives in this job
+      # rather than `lint`.
       - name: Type check (mypy)
         working-directory: vgi-polars
         run: uv run mypy src/
@@ -139,7 +134,7 @@ jobs:
         with:
           path: vgi-polars
 
-      - name: Checkout vgi-python (sibling)
+      - name: Checkout vgi-python (test fixture workers)
         uses: actions/checkout@v7
         with:
           repository: Query-farm/vgi-python
@@ -152,7 +147,7 @@ jobs:
           enable-cache: true
           python-version: "3.13"
 
-      - name: Sync vgi-python
+      - name: Sync vgi-python (fixture workers)
         working-directory: vgi-python
         run: uv sync --extra http
 

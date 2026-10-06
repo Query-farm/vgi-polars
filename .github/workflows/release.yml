@@ -11,10 +11,8 @@ name: Release
 # pyproject.toml's version must match the released tag (e.g. tag v0.1.0 ->
 # version = "0.1.0").
 #
-# Builds against the published vgi-python release on PyPI (not a local sibling
-# checkout — [tool.uv.sources]'s path override is a uv-only dev-resolution hint
-# that never reaches the built sdist/wheel's own dependency metadata, which
-# always names the plain `vgi-python>=...` version bound from pyproject.toml).
+# The built sdist/wheel depend on vgi-python by the plain `vgi-python>=...`
+# bound from pyproject.toml.
 
 on:
   release:
